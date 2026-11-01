@@ -3,6 +3,7 @@
 mod chronicle;
 mod heroes;
 mod market;
+mod save;
 mod tutorial;
 
 use crate::art::{paint_aoe_terrain_pixel, Art, CmdIcon, ResIcon};
@@ -36,6 +37,9 @@ const VK_F1: u32 = 0x70;
 const VK_F2: u32 = 0x71;
 const VK_F3: u32 = 0x72;
 const VK_F4: u32 = 0x73;
+const VK_F5: u32 = 0x74;
+/// 下の画面への操作を遮る透明なボタンの目印
+const BLOCK_LABEL: &str = "#block";
 const VK_F11: u32 = 0x7A;
 const VK_ADD: u32 = 0x6B;
 const VK_SUB: u32 = 0x6D;
@@ -93,6 +97,7 @@ enum Act {
     Restart,
     CloseOverlay,
     Demolish,
+    ResumeBuild,
     IdleWorker,
     Chron,
     ChronPage(i32),
@@ -108,6 +113,11 @@ enum Act {
     TutQuit,
     Scale(i32),
     Fullscreen,
+    SaveMenu,
+    SaveSlot(u8),
+    LoadSlot(u8),
+    ExportSlot(u8),
+    ImportFile,
     Noop,
 }
 
@@ -170,6 +180,10 @@ pub struct Game {
     show_chron: bool,
     show_market: bool,
     show_summon: bool,
+    /// 記録（セーブ・ロード）画面
+    show_save: bool,
+    /// 最後に記録した年（自動記録の間隔）
+    autosave_years: f32,
     /// タイトル画面で選ぶ英霊モード（既定は無効）
     heroic_opt: bool,
     chron_scroll: usize,
@@ -298,6 +312,8 @@ impl Game {
             show_chron: false,
             show_market: false,
             show_summon: false,
+            show_save: false,
+            autosave_years: 0.0,
             heroic_opt: false,
             chron_scroll: 0,
             title_sel: None,
@@ -595,6 +611,9 @@ impl Game {
         (2.0, h - MM_H - 2.0, 2.0 + MM_W, h - 2.0)
     }
     fn over_ui(&self, x: f32, y: f32) -> bool {
+        if self.show_save {
+            return true;
+        }
         if self.screen == Screen::Title {
             return x > self.gfx.width as f32 - 380.0;
         }
@@ -604,7 +623,7 @@ impl Game {
                 return true;
             }
         }
-        if self.show_diplo || self.show_help || self.show_chron || self.show_market || self.show_summon || self.world.game_over.is_some() {
+        if self.show_diplo || self.show_help || self.show_chron || self.show_market || self.show_summon || self.show_save || self.world.game_over.is_some() {
             return true;
         }
         if self.peace_pending() {
@@ -656,6 +675,13 @@ impl Game {
     /// true を返すと終了
     pub fn frame(&mut self, evs: &[Ev], dt: f32, focused: bool) -> bool {
         self.clock += dt;
+        // ファイルから読み込んだ記録・保存の結果
+        if let Some(data) = crate::platform::take_loaded() {
+            self.apply_loaded(&data);
+        }
+        for n in crate::platform::take_notes() {
+            self.notify(&n);
+        }
         // OS からのマウス座標（実ピクセル）を UI 座標系へ
         let ui = self.gfx.ui;
         let mut evs: Vec<Ev> = evs
@@ -696,6 +722,7 @@ impl Game {
                     self.acc = 0.0;
                 }
             }
+            self.autosave_tick();
             self.update_fog(dt);
             self.update_tutorial(dt);
             let pl = self.world.player;
@@ -934,7 +961,7 @@ impl Game {
                             return false;
                         }
                         let (mx0, my0, mx1, my1) = self.mm_rect();
-                        if x >= mx0 && x <= mx1 && y >= my0 && y <= my1 && !self.show_diplo && !self.show_help && !self.show_chron && !self.show_market && !self.show_summon {
+                        if x >= mx0 && x <= mx1 && y >= my0 && y <= my1 && !self.show_diplo && !self.show_help && !self.show_chron && !self.show_market && !self.show_summon && !self.show_save {
                             self.mm_drag = true;
                             self.minimap_jump(x, y);
                             return false;
@@ -1024,6 +1051,10 @@ impl Game {
     fn key_down(&mut self, k: u32) -> bool {
         let ctrl = self.keys[VK_CONTROL as usize];
         match k {
+            VK_F5 => {
+                self.do_act(Act::SaveMenu);
+                return false;
+            }
             VK_F11 => {
                 self.do_act(Act::Fullscreen);
                 return false;
@@ -1040,6 +1071,10 @@ impl Game {
         }
         if self.screen == Screen::Title {
             if k == VK_ESCAPE {
+                if self.show_save {
+                    self.show_save = false;
+                    return false;
+                }
                 return true;
             }
             if k == VK_SPACE || k == 0x0D {
@@ -1067,12 +1102,13 @@ impl Game {
             VK_ESCAPE => {
                 if self.mode != Mode::Normal {
                     self.mode = Mode::Normal;
-                } else if self.show_diplo || self.show_help || self.show_chron || self.show_market || self.show_summon {
+                } else if self.show_diplo || self.show_help || self.show_chron || self.show_market || self.show_summon || self.show_save {
                     self.show_summon = false;
                     self.show_diplo = false;
                     self.show_help = false;
                     self.show_chron = false;
                     self.show_market = false;
+                    self.show_save = false;
                 } else {
                     self.clear_sel();
                 }
@@ -1188,6 +1224,7 @@ impl Game {
             }
         }
         let mut assigned = 0;
+        let mut built = 0;
         let res = self.world.nations[pl].res;
         let mut want = [0.44f32, 0.33, 0.23];
         if self.world.nations[pl].upkeep > self.world.nations[pl].income[0] * 0.55 {
@@ -1208,7 +1245,19 @@ impl Game {
             if skip_builders && matches!(u.order, Order::Build(_)) {
                 continue;
             }
+            if let Order::Build(bh) = u.order {
+                if self.world.bld(bh).map_or(false, |b| !b.done()) && self.world.bld_builders(bh) <= 1 {
+                    continue;
+                }
+            }
             let p = u.pos;
+            // 作業者のいない未完成の建物があれば最優先で建設を再開させる
+            if let Some(bh) = self.world.unfinished_bld(pl, p) {
+                self.world.order_build(&[h], bh);
+                built += 1;
+                assigned += 1;
+                continue;
+            }
             let total = (gathering[0] + gathering[1] + gathering[2] + 1) as f32;
             let mut best_k = 0;
             let mut best_def = f32::MIN;
@@ -1234,9 +1283,51 @@ impl Game {
             }
         }
         if assigned > 0 {
-            self.notice(&format!("民{}体を田・森・銅山へ自動配分した", assigned));
+            if built > 0 {
+                self.notice(&format!("未完成の建物へ民{}体を派遣し、計{}体を自動配分した", built, assigned));
+            } else {
+                self.notice(&format!("民{}体を田・森・銅山へ自動配分した", assigned));
+            }
         } else {
             self.notice("配分できる民や資源が近くにない");
+        }
+    }
+
+    /// 指定した未完成建物へ、近くの民を1体派遣して建設を再開・加速させる
+    fn dispatch_worker_to_build(&mut self, bh: Handle) {
+        let pl = self.world.player;
+        let Some(b) = self.world.bld(bh) else { return };
+        if b.nation as usize != pl || b.done() {
+            return;
+        }
+        let c = b.center();
+        let bname = b.kind.name();
+        let mut best: Option<(f32, Handle)> = None;
+        for (i, u) in self.world.units.iter().enumerate() {
+            if !u.alive || u.nation as usize != pl || u.kind != UnitKind::Worker {
+                continue;
+            }
+            if u.order == Order::Build(bh) {
+                continue;
+            }
+            let pen = match u.order {
+                Order::Idle => 0.0,
+                Order::Build(_) => 100.0,
+                _ => 8.0,
+            };
+            let score = u.pos.dist(c) + pen;
+            if best.map_or(true, |bs| score < bs.0) {
+                best = Some((score, self.world.uh(i)));
+            }
+        }
+        if let Some((_, wh)) = best {
+            self.world.order_build(&[wh], bh);
+            self.marker = Some((c, 0.6, false));
+            self.notice(&format!("民を{}の建設へ派遣した", bname));
+        } else if self.world.bld_builders(bh) > 0 {
+            self.notice(&format!("すでに民が{}を建設中", bname));
+        } else {
+            self.notice("派遣できる民がいない");
         }
     }
 
@@ -1396,14 +1487,23 @@ impl Game {
 
     fn bld_at(&self, p: V2) -> Option<Handle> {
         let (x, y) = p.tile();
-        if !Map::inb(x, y) {
-            return None;
+        if Map::inb(x, y) {
+            let b = self.world.bmap[Map::idx(x, y)];
+            if b != 0 && self.explored(p) {
+                return Some(self.world.bh(b as usize - 1));
+            }
         }
-        let b = self.world.bmap[Map::idx(x, y)];
-        if b == 0 || !self.explored(p) {
-            return None;
+        let mut best: Option<(f32, Handle)> = None;
+        for (i, b) in self.world.blds.iter().enumerate() {
+            if !b.alive || !self.explored(b.center()) {
+                continue;
+            }
+            let d = b.dist_to_footprint(p);
+            if d < 0.45 && best.map_or(true, |bs| d < bs.0) {
+                best = Some((d, self.world.bh(i)));
+            }
         }
-        Some(self.world.bh(b as usize - 1))
+        best.map(|bs| bs.1)
     }
 
     fn select_release(&mut self, sx: f32, sy: f32, x: f32, y: f32) {
@@ -1474,8 +1574,16 @@ impl Game {
 
     fn right_click_world(&mut self, p: V2) {
         let pl = self.world.player;
-        // 建物選択中：集合地点
+        // ユニット未選択時：未完成建物の右クリックなら民を派遣、建物選択中なら集合地点設定
         if self.sel.is_empty() {
+            if let Some(bh) = self.bld_at(p) {
+                if let Some(b) = self.world.bld(bh) {
+                    if b.nation as usize == pl && !b.done() {
+                        self.dispatch_worker_to_build(bh);
+                        return;
+                    }
+                }
+            }
             if let Some(bh) = self.sel_b {
                 if let Some(b) = self.world.bld_mut(bh) {
                     if b.nation as usize == pl && b.kind != BKind::Farm {
@@ -1513,7 +1621,7 @@ impl Game {
         }
         if let Some(bh) = self.bld_at(p) {
             let b = self.world.bld(bh).unwrap();
-            let (bn, kind, done) = (b.nation as usize, b.kind, b.done());
+            let (bn, kind, done, bc) = (b.nation as usize, b.kind, b.done(), b.center());
             if bn != pl {
                 if self.world.at_war(pl, bn) {
                     self.world.order_attack(&hs, Target::Bld(bh));
@@ -1524,8 +1632,16 @@ impl Game {
                 return;
             }
             if !done {
-                self.world.order_build(&workers, bh);
-                self.world.order_move(&soldiers, p, false);
+                if !workers.is_empty() {
+                    self.world.order_build(&workers, bh);
+                    self.marker = Some((bc, 0.6, false));
+                    self.notice(&format!("{}の建設へ民{}体を向かわせた", kind.name(), workers.len()));
+                } else if self.world.bld_builders(bh) == 0 {
+                    self.dispatch_worker_to_build(bh);
+                }
+                if !soldiers.is_empty() {
+                    self.world.order_move(&soldiers, p, false);
+                }
                 return;
             }
             if kind == BKind::Farm && !workers.is_empty() {
@@ -1621,6 +1737,7 @@ impl Game {
                     self.zoom = 22.0;
                     self.cam = self.world.nations[n].home;
                     self.reset_fog();
+                    self.autosave_years = self.world.years;
                     let name = self.world.nations[n].name;
                     self.world.push_msg(format!("紀元前770年、周の東遷。あなたは {} の君主となった。", name), [1.0, 0.9, 0.6]);
                     self.world.push_msg("F1でヘルプ、F2で外交画面を開く".into(), [0.8, 0.8, 0.8]);
@@ -1637,6 +1754,23 @@ impl Game {
                 self.notice(&format!("文字の大きさ ×{:.2}", self.gfx.ui));
             }
             Act::Fullscreen => self.gfx.toggle_fullscreen(),
+            Act::SaveMenu => {
+                self.show_save = !self.show_save;
+                if self.show_save {
+                    self.show_diplo = false;
+                    self.show_help = false;
+                    self.show_chron = false;
+                    self.show_market = false;
+                    self.show_summon = false;
+                }
+            }
+            Act::SaveSlot(s) => self.save_slot(s, false),
+            Act::LoadSlot(s) => {
+                self.notice("記録を読み込んでいる…");
+                crate::platform::load_slot(s);
+            }
+            Act::ExportSlot(s) => crate::platform::export_slot(s),
+            Act::ImportFile => crate::platform::import_file(),
             Act::Restart => {
                 self.tut = None;
                 self.seed = self.seed.wrapping_add(17);
@@ -1650,6 +1784,7 @@ impl Game {
                 self.show_help = false;
                 self.show_chron = false;
                 self.show_market = false;
+                self.show_save = false;
                 self.show_summon = false;
                 self.paused = false;
                 self.speed = 1;
@@ -1800,12 +1935,14 @@ impl Game {
                 self.show_help = false;
                 self.show_chron = false;
                 self.show_market = false;
+                self.show_save = false;
             }
             Act::Help => {
                 self.show_help = !self.show_help;
                 self.show_diplo = false;
                 self.show_chron = false;
                 self.show_market = false;
+                self.show_save = false;
             }
             Act::Chron => {
                 self.show_chron = !self.show_chron;
@@ -1813,6 +1950,7 @@ impl Game {
                 self.show_diplo = false;
                 self.show_help = false;
                 self.show_market = false;
+                self.show_save = false;
             }
             Act::Market => {
                 self.show_market = !self.show_market;
@@ -1845,6 +1983,7 @@ impl Game {
                     self.show_help = false;
                     self.show_chron = false;
                     self.show_market = false;
+                    self.show_save = false;
                 }
             }
             Act::SummonHero(k) => {
@@ -1863,6 +2002,7 @@ impl Game {
                 self.show_help = false;
                 self.show_chron = false;
                 self.show_market = false;
+                self.show_save = false;
             }
             Act::War(o) => {
                 if self.world.truce[pl][o] > self.world.years {
@@ -1896,12 +2036,17 @@ impl Game {
             Act::Demolish => {
                 if let Some(bh) = self.sel_b {
                     if let Some(b) = self.world.bld(bh) {
-                        if b.nation as usize == pl && !b.kind.city() {
+                        if b.nation as usize == pl && (!b.kind.city() || !b.done()) {
                             let i = bh.idx as usize;
                             self.world.remove_building(i);
                             self.sel_b = None;
                         }
                     }
+                }
+            }
+            Act::ResumeBuild => {
+                if let Some(bh) = self.sel_b {
+                    self.dispatch_worker_to_build(bh);
                 }
             }
             Act::IdleWorker => {
@@ -1944,6 +2089,9 @@ impl Game {
             }
             if self.screen == Screen::Title {
                 self.render_title();
+                if self.show_save {
+                    self.render_save();
+                }
             } else {
                 self.render_hud();
                 if self.show_diplo {
@@ -1960,6 +2108,9 @@ impl Game {
                 }
                 if self.show_summon {
                     self.render_summon();
+                }
+                if self.show_save {
+                    self.render_save();
                 }
                 if self.peace_pending() {
                     self.render_peace_ask();
@@ -2039,6 +2190,11 @@ impl Game {
             }
             let nc = wd.nations[b.nation as usize].color;
             let (x0, y0, x1, y1) = (b.tx as f32, b.ty as f32, b.tx as f32 + 2.0, b.ty as f32 + 2.0);
+            if wd.descent.is_some() && b.nation as usize == 2 && b.kind.city() {
+                let dr = if b.kind == BKind::Capital { 1.58 } else { 1.32 };
+                g.circle(c.x, c.y + 0.08, dr, 24, [1.0, 0.92, 0.45, 0.25]);
+                g.ring(c.x, c.y + 0.08, dr, (2.2 * px).max(0.06), 24, [1.0, 0.90, 0.42, 0.90]);
+            }
             crate::art::draw_world_building(g, b, nc, px);
             let sel = self.sel_b == Some(wd.bh(bi));
             if sel {
@@ -2068,6 +2224,9 @@ impl Game {
             if u.hero != NONE {
                 g.circle(u.pos.x, u.pos.y + 0.15, 0.75, 16, [1.0, 0.85, 0.35, 0.35]);
                 g.ring(u.pos.x, u.pos.y + 0.15, 0.75, (2.0 * px).max(0.05), 16, [1.0, 0.85, 0.35, 0.95]);
+            } else if u.divine {
+                g.circle(u.pos.x, u.pos.y + 0.12, 0.56, 16, [1.0, 0.94, 0.55, 0.28]);
+                g.ring(u.pos.x, u.pos.y + 0.12, 0.56, (1.8 * px).max(0.045), 16, [1.0, 0.92, 0.48, 0.92]);
             }
             crate::art::draw_world_unit(g, u, nc, ue, &RES_COLORS, px);
         }
@@ -2167,6 +2326,7 @@ impl Game {
                 progress: f32,
                 hp_frac: Option<f32>,
                 fogged: bool,
+                divine: bool,
             },
             Unit {
                 sx: f32,
@@ -2178,6 +2338,8 @@ impl Game {
                 carry: Option<usize>,
                 flip_x: bool,
                 hp_frac: Option<f32>,
+                hero: u8,
+                divine: bool,
             },
         }
 
@@ -2286,6 +2448,7 @@ impl Game {
                     None
                 };
                 let sort_y = if b.kind == BKind::Farm { sy - r * 0.2 } else { sy + r * 0.45 };
+                let divine = self.world.descent.is_some() && b.nation as usize == 2 && b.kind.city();
                 items.push((
                     sort_y,
                     WorldItem::Building {
@@ -2298,6 +2461,7 @@ impl Game {
                         progress: b.progress,
                         hp_frac,
                         fogged,
+                        divine,
                     },
                 ));
             }
@@ -2333,6 +2497,8 @@ impl Game {
                             carry,
                             flip_x,
                             hp_frac,
+                            hero: u.hero,
+                            divine: u.divine,
                         },
                     ));
                 }
@@ -2357,9 +2523,14 @@ impl Game {
                             self.gfx.draw_bitmap(bmp, sx - r, sy - r * 1.05, sx + r, sy + r * 0.95);
                         }
                     }
-                    WorldItem::Building { sx, sy, r, kind, nc, done, progress, hp_frac, fogged } => {
+                    WorldItem::Building { sx, sy, r, kind, nc, done, progress, hp_frac, fogged, divine } => {
                         let alpha = if done { 1.0 } else { 0.65 };
-                        if let Some(bmp) = self.art.bld_sprite(kind, fogged) {
+                        let b_bmp = if divine {
+                            self.art.divine_bld_sprite(kind, fogged)
+                        } else {
+                            self.art.bld_sprite(kind, fogged)
+                        };
+                        if let Some(bmp) = b_bmp {
                             self.gfx.draw_bitmap_alpha(bmp, sx - r, sy - r * 1.08, sx + r, sy + r * 0.92, alpha);
                         }
                         // 建物右下の国色紋章バッジ（どの国の城邑・兵営か一目で判別可能に）
@@ -2369,8 +2540,13 @@ impl Game {
                             let by = sy + r * 0.48;
                             let k = if fogged { 0.55 } else { 1.0 };
                             self.gfx.fill_circle(bx, by, br + 1.2, [0.06, 0.05, 0.04, 0.92]);
-                            self.gfx.fill_circle(bx, by, br, [nc[0] * k, nc[1] * k, nc[2] * k, 1.0]);
-                            self.gfx.stroke_circle(bx, by, br + 0.5, 1.1, [0.95 * k, 0.82 * k, 0.38 * k, 0.95]);
+                            if divine {
+                                self.gfx.fill_circle(bx, by, br, [1.0 * k, 0.90 * k, 0.42 * k, 1.0]);
+                                self.gfx.stroke_circle(bx, by, br + 0.6, 1.3, [0.95 * k, 0.98 * k, 1.0 * k, 0.98]);
+                            } else {
+                                self.gfx.fill_circle(bx, by, br, [nc[0] * k, nc[1] * k, nc[2] * k, 1.0]);
+                                self.gfx.stroke_circle(bx, by, br + 0.5, 1.1, [0.95 * k, 0.82 * k, 0.38 * k, 0.95]);
+                            }
                         }
                         if !done {
                             let bw = (r * 1.4).max(16.0);
@@ -2387,19 +2563,41 @@ impl Game {
                             self.gfx.fill_round(sx - bw * 0.5, by, sx - bw * 0.5 + bw * f, by + 3.5, 1.5, [1.0 - f, 0.22 + 0.75 * f, 0.15, 0.95]);
                         }
                     }
-                    WorldItem::Unit { sx, sy, kind, ue, pw, nc, carry, flip_x, hp_frac } => {
-                        let scale = if kind == UnitKind::Chariot { 0.76 } else { 0.62 };
-                        let r = (z * scale * (1.0 + 0.04 * (pw - 1.0).min(4.0))).clamp(7.5, 22.0);
-                        if let Some(bmp) = self.art.unit_sprite(kind, ue, flip_x) {
+                    WorldItem::Unit { sx, sy, kind, ue, pw, nc, carry, flip_x, hp_frac, hero, divine } => {
+                        let is_hero = (hero as usize) < HEROES.len();
+                        let scale = if is_hero {
+                            if kind == UnitKind::Chariot { 0.88 } else { 0.78 }
+                        } else if divine {
+                            if kind == UnitKind::Chariot { 0.82 } else { 0.70 }
+                        } else if kind == UnitKind::Chariot {
+                            0.76
+                        } else {
+                            0.62
+                        };
+                        let max_r = if is_hero { 27.0 } else if divine { 24.0 } else { 22.0 };
+                        let r = (z * scale * (1.0 + 0.04 * (pw - 1.0).min(4.0))).clamp(7.5, max_r);
+                        let u_bmp = if is_hero {
+                            self.art.hero_sprite(hero as usize, flip_x)
+                        } else if divine {
+                            self.art.divine_unit_sprite(kind, flip_x)
+                        } else {
+                            self.art.unit_sprite(kind, ue, flip_x)
+                        };
+                        if let Some(bmp) = u_bmp {
                             self.gfx.draw_bitmap(bmp, sx - r, sy - r * 1.35, sx + r, sy + r * 0.65);
                         }
-                        // 足元右下の国色小紋章
+                        // 足元右下の国色小紋章（上帝の軍は神々しい白金紋章）
                         let pr = (r * 0.19).clamp(2.2, 3.8);
                         let px0 = sx + r * 0.42;
                         let py0 = sy + r * 0.32;
                         self.gfx.fill_circle(px0, py0, pr + 0.9, [0.08, 0.06, 0.04, 0.92]);
-                        self.gfx.fill_circle(px0, py0, pr, c4(nc, 1.0));
-                        self.gfx.stroke_circle(px0, py0, pr + 0.4, 0.8, [0.95, 0.82, 0.42, 0.9]);
+                        if divine {
+                            self.gfx.fill_circle(px0, py0, pr, [1.0, 0.92, 0.48, 1.0]);
+                            self.gfx.stroke_circle(px0, py0, pr + 0.5, 0.9, [0.92, 0.98, 1.0, 0.95]);
+                        } else {
+                            self.gfx.fill_circle(px0, py0, pr, c4(nc, 1.0));
+                            self.gfx.stroke_circle(px0, py0, pr + 0.4, 0.8, [0.95, 0.82, 0.42, 0.9]);
+                        }
                         // 資源運搬中はミニ資源アイコンを左上に表示
                         if let Some(ck) = carry {
                             if z >= 11.0 {
@@ -2447,20 +2645,28 @@ impl Game {
             if z < 9.0 && !cap {
                 continue;
             }
-            let name = if cap { n.name.to_string() } else { format!("{}・邑", n.name) };
-            labels.push((sx, sy, name, cap, n.color));
+            let divine = self.world.descent.is_some() && b.nation as usize == 2;
+            let name = if divine {
+                if cap { "上帝・秦".to_string() } else { "上帝・邑".to_string() }
+            } else if cap {
+                n.name.to_string()
+            } else {
+                format!("{}・邑", n.name)
+            };
+            let col = if divine { [1.0, 0.88, 0.38] } else { n.color };
+            labels.push((sx, sy, name, cap, col, divine));
         }
-        for (sx, sy, name, cap, c) in labels {
+        for (sx, sy, name, cap, c, divine) in labels {
             let f = if cap && z >= 9.0 { Font::BigCenter } else { Font::NormalCenter };
             let off = if z >= 9.0 { 1.58 * z + 14.0 } else { 1.25 * z + 6.0 };
             let ty = sy - off - 14.0;
             if z >= 8.0 {
-                let bw = if cap { 64.0 } else { 72.0 };
+                let bw = if divine { 82.0 } else if cap { 64.0 } else { 72.0 };
                 let bh = if cap { 24.0 } else { 20.0 };
                 let bx0 = sx - bw * 0.5;
                 let by0 = ty + (28.0 - bh) * 0.5;
-                self.gfx.fill_round(bx0, by0, bx0 + bw, by0 + bh, 4.0, [0.08, 0.06, 0.04, 0.82]);
-                self.gfx.stroke_round(bx0, by0, bx0 + bw, by0 + bh, 4.0, 1.2, [c[0] * 0.7 + 0.25, c[1] * 0.7 + 0.25, c[2] * 0.7 + 0.2, 0.9]);
+                self.gfx.fill_round(bx0, by0, bx0 + bw, by0 + bh, 4.0, [0.08, 0.06, 0.04, 0.85]);
+                self.gfx.stroke_round(bx0, by0, bx0 + bw, by0 + bh, 4.0, if divine { 1.6 } else { 1.2 }, [c[0] * 0.7 + 0.25, c[1] * 0.7 + 0.25, c[2] * 0.7 + 0.2, 0.95]);
             }
             let col = [c[0] * 0.45 + 0.55, c[1] * 0.45 + 0.55, c[2] * 0.45 + 0.55, 1.0];
             self.gfx.text_shadow(&name, sx - 80.0, ty, 160.0, 28.0, f, col);
@@ -2470,7 +2676,7 @@ impl Game {
     fn act_cmd_icon(&self, act: Act) -> Option<CmdIcon> {
         let era = self.world.era;
         match act {
-            Act::Train(UnitKind::Worker) | Act::SelectAllWorkers | Act::SelectKind(UnitKind::Worker) | Act::FilterKind(UnitKind::Worker) => Some(CmdIcon::Worker),
+            Act::Train(UnitKind::Worker) | Act::SelectAllWorkers | Act::SelectKind(UnitKind::Worker) | Act::FilterKind(UnitKind::Worker) | Act::ResumeBuild => Some(CmdIcon::Worker),
             Act::Train(UnitKind::Infantry) | Act::SelectKind(UnitKind::Infantry) | Act::FilterKind(UnitKind::Infantry) => Some(CmdIcon::Infantry),
             Act::Train(UnitKind::Archer) | Act::SelectKind(UnitKind::Archer) | Act::FilterKind(UnitKind::Archer) => Some(CmdIcon::Archer),
             Act::Train(UnitKind::Chariot) | Act::SelectKind(UnitKind::Chariot) | Act::FilterKind(UnitKind::Chariot) => {
@@ -2672,10 +2878,21 @@ impl Game {
             self.add_button(px + 50.0, 530.0, w - 50.0, 576.0, "この国で覇業を開始", "", 0, true, Act::Start, "");
         }
         let ty = (h - 128.0).max(592.0);
+        // 記録から続ける（空きがあれば独立した行、狭ければ英霊モードの行と並べる）
+        let cy = ty - 108.0;
+        let heroic_x0 = if self.title_sel.is_some() && cy < 590.0 {
+            let mid = px + 24.0 + (w - 48.0 - px) * 0.5;
+            self.add_button(mid + 4.0, ty - 54.0, w - 24.0, ty - 12.0, "続きから F5", "", 0, true, Act::SaveMenu, "記録した対局を再開する");
+            Some(mid - 4.0)
+        } else {
+            self.add_button(px + 24.0, cy, w - 24.0, cy + 42.0, "続きから（記録を読み込む） F5", "", 0, true, Act::SaveMenu, "記録した対局を再開する。書き出したファイルからも読み込める");
+            None
+        };
         let hl = if self.heroic_opt { "英霊モード：オン" } else { "英霊モード：オフ" };
-        self.add_button(px + 24.0, ty - 54.0, w - 24.0, ty - 12.0, hl, "", 0, true, Act::ToggleHeroic, "三皇五帝から春秋戦国の英霊を、民を生贄にして時代と国を超えて呼べる（一国に一体）。英霊は上帝の軍を傷つけられ、上帝降臨から10年後の版図が上帝の秦より広ければ勝利。他国も召喚する");
+        let hx1 = heroic_x0.unwrap_or(w - 24.0);
+        self.add_button(px + 24.0, ty - 54.0, hx1, ty - 12.0, hl, "", 0, true, Act::ToggleHeroic, "三皇五帝から春秋戦国の英霊を、民を生贄にして時代と国を超えて呼べる（一国に一体）。英霊は上帝の軍を傷つけられ、上帝降臨から10年後の版図が上帝の秦より広ければ勝利。他国も召喚する");
         if self.heroic_opt {
-            self.gfx.stroke_round(px + 24.0, ty - 54.0, w - 24.0, ty - 12.0, 3.0, 2.0, [1.0, 0.85, 0.4, 1.0]);
+            self.gfx.stroke_round(px + 24.0, ty - 54.0, hx1, ty - 12.0, 3.0, 2.0, [1.0, 0.85, 0.4, 1.0]);
         }
         self.add_button(px + 24.0, ty, w - 24.0, ty + 48.0, "はじめての方は：チュートリアル", "", 0, true, Act::Tutorial, "晋の君主として、操作と遊び方を1段ずつ学ぶ");
         let ty = ty + 60.0;
@@ -2686,7 +2903,7 @@ impl Game {
         // タイトル画面のツールチップ
         let (mx, my) = self.mouse;
         let tip = self.buttons.iter().find(|b| mx >= b.x0 && mx <= b.x1 && my >= b.y0 && my <= b.y1 && !b.tip.is_empty()).map(|b| b.tip.clone());
-        if let Some(t) = tip {
+        if let Some(t) = tip.filter(|_| !self.show_save) {
             // 説明の行数に合わせて上へ伸ばす
             let x0 = px + 24.0;
             let th = self.gfx.measure_h(&t, Font::Small, w - x0 - 40.0) + 10.0;
@@ -2827,6 +3044,8 @@ impl Game {
         self.add_button(w - 242.0, 5.0, w - 166.0, 31.0, "交易 F4", "", 0, true, Act::Market, "商人の税・市場・山岳民と遊牧民・傭兵・西域");
         self.add_button(w - 162.0, 5.0, w - 84.0, 31.0, "外交 F2", "", 0, true, Act::Diplo, "");
         self.add_button(w - 80.0, 5.0, w - 4.0, 31.0, "ヘルプ F1", "", 0, true, Act::Help, "");
+        // 記録（上部バーに余地が無いので、その下の右端に置く）
+        self.add_button(w - 80.0, TOP_H + 4.0, w - 4.0, TOP_H + 30.0, "記録 F5", "", 0, true, Act::SaveMenu, "記録（セーブ・ロード）。10年ごとに自動でも記録する");
         if paused {
             self.gfx.text_shadow("一時停止中（Space）", w / 2.0 - 120.0, TOP_H + 60.0, 240.0, 30.0, Font::BigCenter, [1.0, 1.0, 0.8, 1.0]);
         } else if let Some(left) = self.world.descent_left() {
@@ -2959,7 +3178,7 @@ impl Game {
         let cx0 = w - 388.0;
         self.art.draw_inset_box(&self.gfx, cx0, py + 6.0, w - 4.0, h - 4.0);
         self.art.draw_corner_ornaments(&self.gfx, cx0 + 2.0, py + 8.0, w - 6.0, h - 6.0, 11.0);
-        if !self.show_diplo && !self.show_help && !self.show_chron && !self.show_market && !self.show_summon {
+        if !self.show_diplo && !self.show_help && !self.show_chron && !self.show_market && !self.show_summon && !self.show_save {
             self.render_commands(w - 382.0, py + 12.0);
         }
 
@@ -2975,7 +3194,18 @@ impl Game {
         let (w, h) = (self.gfx.width as f32, self.gfx.height as f32);
         let (mx, my) = self.mouse;
         // 後から置いたボタン（上に重なる画面）を優先
-        let tip = self.buttons.iter().rev().find(|b| mx >= b.x0 && mx <= b.x1 && my >= b.y0 && my <= b.y1 && !b.tip.is_empty()).map(|b| b.tip.clone());
+        let mut tip = None;
+        for b in self.buttons.iter().rev() {
+            if mx >= b.x0 && mx <= b.x1 && my >= b.y0 && my <= b.y1 {
+                if b.label == BLOCK_LABEL {
+                    break;
+                }
+                if !b.tip.is_empty() {
+                    tip = Some(b.tip.clone());
+                    break;
+                }
+            }
+        }
         let Some(t) = tip else { return };
         let tw = 340.0f32.min(w - 8.0);
         let th = self.gfx.measure_h(&t, Font::Small, tw - 16.0) + 14.0;
@@ -3017,7 +3247,14 @@ impl Game {
             self.art.draw_inset_box(&self.gfx, px0 - 2.0, py0 - 2.0, px0 + psz + 2.0, py0 + psz + 2.0);
             self.gfx.fill_circle(px0 + psz * 0.5, py0 + psz * 0.74, psz * 0.34, c4(nc, 0.42));
             self.gfx.stroke_circle(px0 + psz * 0.5, py0 + psz * 0.74, psz * 0.34, 1.5, c4(nc, 0.9));
-            if let Some(bmp) = self.art.unit_sprite(u.kind, era, false) {
+            let sprite_bmp = if (u.hero as usize) < HEROES.len() {
+                self.art.hero_sprite(u.hero as usize, false)
+            } else if u.divine {
+                self.art.divine_unit_sprite(u.kind, false).or_else(|| self.art.unit_sprite(u.kind, era, false))
+            } else {
+                self.art.unit_sprite(u.kind, era, false)
+            };
+            if let Some(bmp) = sprite_bmp {
                 self.gfx.draw_bitmap(bmp, px0 + 2.0, py0 + 2.0, px0 + psz - 2.0, py0 + psz - 2.0);
             }
             // 肖像下のHPバー
@@ -3031,6 +3268,8 @@ impl Game {
             let title = if (u.hero as usize) < HEROES.len() {
                 let d = &HEROES[u.hero as usize];
                 format!("英霊・{}（{}）【{}】", d.name, d.era, n.name)
+            } else if u.divine {
+                format!("上帝の軍・{}　【{}】", u.kind.name(era), n.name)
             } else if (u.tribe as usize) < TRIBES.len() {
                 let td = &TRIBES[u.tribe as usize];
                 let ue = if td.nomad { Era::Warring } else { era };
@@ -3051,11 +3290,17 @@ impl Game {
                 self.order_text(u),
                 if u.carry > 0.5 { format!("（{} {:.0}）", RES_NAMES[u.carry_kind], u.carry) } else { String::new() }
             );
-            let desc = match u.kind {
-                UnitKind::Worker => "生産ユニット。田・森・銅山で資源を集め、建物を建てる。",
-                UnitKind::Infantry => "戈を持つ歩兵。戦車・騎兵に強い。建物攻撃に優れる。",
-                UnitKind::Archer => "遠距離から射撃する。歩兵に強いが戦車・騎兵に弱い。",
-                UnitKind::Chariot => "高速の突撃兵。弩兵と民に強いが、戈兵に弱い。",
+            let desc = if (u.hero as usize) < HEROES.len() {
+                HEROES[u.hero as usize].desc
+            } else if u.divine {
+                "天より降りた上帝の不死身の神兵。通常の兵では傷つけられず、英霊のみがこれを討てる。"
+            } else {
+                match u.kind {
+                    UnitKind::Worker => "生産ユニット。田・森・銅山で資源を集め、建物を建てる。",
+                    UnitKind::Infantry => "戈を持つ歩兵。戦車・騎兵に強い。建物攻撃に優れる。",
+                    UnitKind::Archer => "遠距離から射撃する。歩兵に強いが戦車・騎兵に弱い。",
+                    UnitKind::Chariot => "高速の突撃兵。弩兵と民に強いが、戈兵に弱い。",
+                }
             };
             self.gfx.text_shadow(&title, tx, y + 2.0, tw, 28.0, Font::Big, tc);
             self.gfx.text(&lines, tx, y + 34.0, tw, 52.0, Font::Normal, tc);
@@ -3117,11 +3362,17 @@ impl Game {
             let b = self.world.bld(bh).unwrap();
             let n = &self.world.nations[b.nation as usize];
             let nc = n.color;
+            let is_divine_city = self.world.descent.is_some() && b.nation as usize == 2 && b.kind.city();
             let px0 = x + 2.0;
             let py0 = y + 4.0;
             let psz = 68.0;
-            self.gfx.fill_rect(px0 - 2.0, py0 - 2.0, px0 + psz + 2.0, py0 + psz + 2.0, c4(nc, 0.9));
-            if let Some(bmp) = self.art.bld_icon(b.kind) {
+            self.gfx.fill_rect(px0 - 2.0, py0 - 2.0, px0 + psz + 2.0, py0 + psz + 2.0, if is_divine_city { [0.95, 0.85, 0.45, 0.95] } else { c4(nc, 0.9) });
+            let bld_bmp = if is_divine_city {
+                self.art.divine_bld_sprite(b.kind, false).or_else(|| self.art.bld_icon(b.kind))
+            } else {
+                self.art.bld_icon(b.kind)
+            };
+            if let Some(bmp) = bld_bmp {
                 self.gfx.draw_bitmap(bmp, px0, py0, px0 + psz, py0 + psz);
             }
             let f = (b.hp / b.kind.max_hp()).clamp(0.0, 1.0);
@@ -3131,17 +3382,30 @@ impl Game {
 
             let tx = x + 84.0;
             let tw = (wd - 84.0).max(100.0);
-            let title = format!("{}　【{}】", b.kind.name(), n.name);
+            let title = if is_divine_city {
+                format!("上帝の{}　【{}】", b.kind.name(), n.name)
+            } else {
+                format!("{}　【{}】", b.kind.name(), n.name)
+            };
             let mut s = format!("耐久 {:.0}/{:.0}", b.hp.max(0.0), b.kind.max_hp());
             if !b.done() {
-                s.push_str(&format!("　（建設中 {:.0}%）", b.progress * 100.0));
+                let builders = self.world.bld_builders(bh);
+                if builders > 0 {
+                    s.push_str(&format!("　（建設中 {:.0}%・作業民{}体）", b.progress * 100.0, builders));
+                } else {
+                    s.push_str(&format!("　（建設中断 {:.0}%・右の「建設を再開」で民を派遣）", b.progress * 100.0));
+                }
             }
-            let desc = match b.kind {
-                BKind::Capital => "国の中心。民を訓練し、資源の集積地となる。失うと遷都し、全ての城邑を失うと滅亡する。",
-                BKind::Town => "領土を広げ、民を訓練し、資源の集積地となる。城邑が増えるほど人口上限が上がる。",
-                BKind::Barracks => "戈兵・弩兵・戦車（騎兵）を訓練する。",
-                BKind::Farm => "民が耕すと糧を産む。枯れることはない。",
-                BKind::Fort => "近づく敵兵を射る（射程9）。数は城邑の数で決まる上限まで。",
+            let desc = if is_divine_city {
+                "天より降臨した上帝の神威が宿る神聖な城邑。上帝の軍が湧き出でる拠点であり、全ての邑を落とせば上帝は退く。"
+            } else {
+                match b.kind {
+                    BKind::Capital => "国の中心。民を訓練し、資源の集積地となる。失うと遷都し、全ての城邑を失うと滅亡する。",
+                    BKind::Town => "領土を広げ、民を訓練し、資源の集積地となる。城邑が増えるほど人口上限が上がる。",
+                    BKind::Barracks => "戈兵・弩兵・戦車（騎兵）を訓練する。",
+                    BKind::Farm => "民が耕すと糧を産む。枯れることはない。",
+                    BKind::Fort => "近づく敵兵を射る（射程9）。数は城邑の数で決まる上限まで。",
+                }
             };
             let queue: Vec<(UnitKind, f32)> = b.queue.iter().enumerate().map(|(i, k)| (*k, if i == 0 { b.queue_t / k.train_time() } else { 0.0 })).collect();
             self.gfx.text_shadow(&title, tx, y, tw, 28.0, Font::Big, tc);
@@ -3161,11 +3425,17 @@ impl Game {
         } else {
             let n = &self.world.nations[pl];
             let nc = n.color;
+            let is_divine = self.world.descent.is_some() && pl == 2;
             let px0 = x + 2.0;
             let py0 = y + 4.0;
             let psz = 68.0;
-            self.gfx.fill_rect(px0 - 2.0, py0 - 2.0, px0 + psz + 2.0, py0 + psz + 2.0, c4(nc, 0.9));
-            if let Some(bmp) = self.art.bld_icon(BKind::Capital) {
+            self.gfx.fill_rect(px0 - 2.0, py0 - 2.0, px0 + psz + 2.0, py0 + psz + 2.0, if is_divine { [0.95, 0.85, 0.45, 0.95] } else { c4(nc, 0.9) });
+            let cap_bmp = if is_divine {
+                self.art.divine_bld_sprite(BKind::Capital, false).or_else(|| self.art.bld_icon(BKind::Capital))
+            } else {
+                self.art.bld_icon(BKind::Capital)
+            };
+            if let Some(bmp) = cap_bmp {
                 self.gfx.draw_bitmap(bmp, px0, py0, px0 + psz, py0 + psz);
             }
             let tx = x + 84.0;
@@ -3356,8 +3626,22 @@ impl Game {
                     self.add_button(x0, y0, x1, y1, k.name(era), &Self::cost_str(c), key as u32, afford(c), Act::Train(k), &tip);
                     i += 1;
                 }
+            } else {
+                let (x0, y0, x1, y1) = pos(0);
+                self.add_button(
+                    x0,
+                    y0,
+                    x1,
+                    y1,
+                    "建設を再開",
+                    "民を派遣",
+                    'Q' as u32,
+                    n_workers > 0,
+                    Act::ResumeBuild,
+                    "近くの民をこの建物の建設へ派遣し、中断した建設を再開（または作業人数を追加）する（Q）",
+                );
             }
-            if !kind.city() {
+            if !kind.city() || !done {
                 let (x0, y0, x1, y1) = pos(8);
                 self.add_button(x0, y0, x1, y1, "取り壊す", "", 0, true, Act::Demolish, "この建物を取り壊す（Delete）");
             }
@@ -3549,7 +3833,7 @@ impl Game {
 　Ctrl を押しながら建物を置く：建設の予約（続けて置ける）。選んだ民は今の建設を終えてから、置いた順に建てていく（建設地に順番を表示）
 　Ctrl+数字：部隊登録　数字：部隊呼び出し　.：待機中の民　Home：国都へ
 　ホイール：拡大縮小　中ボタンドラッグ・矢印キー・画面端：スクロール　ミニマップクリック：移動
-　Space：一時停止　＋／－：速度　Esc：取り消し　F11：全画面　Ctrl＋＋／Ctrl＋−：文字の大きさ";
+　Space：一時停止　＋／－：速度　Esc：取り消し　F5：記録（セーブ・ロード）　F11：全画面　Ctrl＋＋／Ctrl＋−：文字の大きさ";
         // 入りきらなければ小さい字にする
         let f = if self.gfx.measure_h(text, Font::Normal, pw - 48.0) > ph - 64.0 { Font::Small } else { Font::Normal };
         self.gfx.text(text, x0 + 24.0, y0 + 52.0, pw - 48.0, ph - 64.0, f, [0.92, 0.9, 0.84, 1.0]);
@@ -3573,6 +3857,7 @@ impl Game {
         };
         self.gfx.text_shadow(title, x0, y0 + 20.0, pw, 60.0, Font::Title, if win { [1.0, 0.85, 0.4, 1.0] } else { [0.9, 0.4, 0.35, 1.0] });
         self.gfx.text(&text, x0 + 20.0, y0 + 100.0, pw - 40.0, 60.0, Font::BigCenter, [0.95, 0.92, 0.85, 1.0]);
-        self.add_button(x0 + pw / 2.0 - 100.0, y0 + 180.0, x0 + pw / 2.0 + 100.0, y0 + 228.0, "新しい天下へ", "", 0, true, Act::Restart, "");
+        self.add_button(x0 + pw / 2.0 - 210.0, y0 + 180.0, x0 + pw / 2.0 - 10.0, y0 + 228.0, "新しい天下へ", "", 0, true, Act::Restart, "");
+        self.add_button(x0 + pw / 2.0 + 10.0, y0 + 180.0, x0 + pw / 2.0 + 210.0, y0 + 228.0, "記録から再開 F5", "", 0, true, Act::SaveMenu, "");
     }
 }

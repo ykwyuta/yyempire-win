@@ -67,6 +67,51 @@ const RAW_PROP_SPRITES: [&[u8]; 3] = [
     include_bytes!("../assets/map/mine.bgra"),
 ];
 
+const HERO_SPRITE_SZ: usize = 128;
+const RAW_HERO_SPRITES: [&[u8]; 31] = [
+    include_bytes!("../assets/heroes/hero_00.bgra"),
+    include_bytes!("../assets/heroes/hero_01.bgra"),
+    include_bytes!("../assets/heroes/hero_02.bgra"),
+    include_bytes!("../assets/heroes/hero_03.bgra"),
+    include_bytes!("../assets/heroes/hero_04.bgra"),
+    include_bytes!("../assets/heroes/hero_05.bgra"),
+    include_bytes!("../assets/heroes/hero_06.bgra"),
+    include_bytes!("../assets/heroes/hero_07.bgra"),
+    include_bytes!("../assets/heroes/hero_08.bgra"),
+    include_bytes!("../assets/heroes/hero_09.bgra"),
+    include_bytes!("../assets/heroes/hero_10.bgra"),
+    include_bytes!("../assets/heroes/hero_11.bgra"),
+    include_bytes!("../assets/heroes/hero_12.bgra"),
+    include_bytes!("../assets/heroes/hero_13.bgra"),
+    include_bytes!("../assets/heroes/hero_14.bgra"),
+    include_bytes!("../assets/heroes/hero_15.bgra"),
+    include_bytes!("../assets/heroes/hero_16.bgra"),
+    include_bytes!("../assets/heroes/hero_17.bgra"),
+    include_bytes!("../assets/heroes/hero_18.bgra"),
+    include_bytes!("../assets/heroes/hero_19.bgra"),
+    include_bytes!("../assets/heroes/hero_20.bgra"),
+    include_bytes!("../assets/heroes/hero_21.bgra"),
+    include_bytes!("../assets/heroes/hero_22.bgra"),
+    include_bytes!("../assets/heroes/hero_23.bgra"),
+    include_bytes!("../assets/heroes/hero_24.bgra"),
+    include_bytes!("../assets/heroes/hero_25.bgra"),
+    include_bytes!("../assets/heroes/hero_26.bgra"),
+    include_bytes!("../assets/heroes/hero_27.bgra"),
+    include_bytes!("../assets/heroes/hero_28.bgra"),
+    include_bytes!("../assets/heroes/hero_29.bgra"),
+    include_bytes!("../assets/heroes/hero_30.bgra"),
+];
+
+const RAW_DIVINE_UNIT_SPRITES: [&[u8]; 2] = [
+    include_bytes!("../assets/divine/divine_infantry.bgra"),
+    include_bytes!("../assets/divine/divine_chariot.bgra"),
+];
+
+const RAW_DIVINE_BLD_SPRITES: [&[u8]; 2] = [
+    include_bytes!("../assets/divine/divine_capital.bgra"),
+    include_bytes!("../assets/divine/divine_town.bgra"),
+];
+
 pub struct Art {
     gen: u32,
     pub hud_stone: Option<ID2D1Bitmap>,
@@ -86,6 +131,12 @@ pub struct Art {
     pub prop_sprites_flip: [Option<ID2D1Bitmap>; 3],
     pub prop_sprites_fog: [Option<ID2D1Bitmap>; 3],
     pub prop_sprites_fog_flip: [Option<ID2D1Bitmap>; 3],
+    pub hero_sprites: [Option<ID2D1Bitmap>; 31],
+    pub hero_sprites_flip: [Option<ID2D1Bitmap>; 31],
+    pub divine_unit_sprites: [Option<ID2D1Bitmap>; 2],
+    pub divine_unit_sprites_flip: [Option<ID2D1Bitmap>; 2],
+    pub divine_bld_sprites: [Option<ID2D1Bitmap>; 2],
+    pub divine_bld_sprites_fog: [Option<ID2D1Bitmap>; 2],
 }
 
 struct Canvas {
@@ -906,6 +957,12 @@ impl Art {
             prop_sprites_flip: Default::default(),
             prop_sprites_fog: Default::default(),
             prop_sprites_fog_flip: Default::default(),
+            hero_sprites: Default::default(),
+            hero_sprites_flip: Default::default(),
+            divine_unit_sprites: Default::default(),
+            divine_unit_sprites_flip: Default::default(),
+            divine_bld_sprites: Default::default(),
+            divine_bld_sprites_fog: Default::default(),
         }
     }
 
@@ -978,6 +1035,55 @@ impl Art {
             self.prop_sprites_flip[p] = gfx.create_bitmap(psz, psz, &load_raw_sprite_bgra(RAW_PROP_SPRITES[p], PROP_SPRITE_SZ, true, 1.0));
             self.prop_sprites_fog[p] = gfx.create_bitmap(psz, psz, &load_raw_sprite_bgra(RAW_PROP_SPRITES[p], PROP_SPRITE_SZ, false, 0.52));
             self.prop_sprites_fog_flip[p] = gfx.create_bitmap(psz, psz, &load_raw_sprite_bgra(RAW_PROP_SPRITES[p], PROP_SPRITE_SZ, true, 0.52));
+        }
+        let hsz = HERO_SPRITE_SZ as u32;
+        for h in 0..31 {
+            self.hero_sprites[h] = gfx.create_bitmap(hsz, hsz, &load_raw_sprite_bgra(RAW_HERO_SPRITES[h], HERO_SPRITE_SZ, false, 1.0));
+            self.hero_sprites_flip[h] = gfx.create_bitmap(hsz, hsz, &load_raw_sprite_bgra(RAW_HERO_SPRITES[h], HERO_SPRITE_SZ, true, 1.0));
+        }
+        let usz = UNIT_SPRITE_SZ as u32;
+        for d in 0..2 {
+            self.divine_unit_sprites[d] = gfx.create_bitmap(usz, usz, &load_raw_sprite_bgra(RAW_DIVINE_UNIT_SPRITES[d], UNIT_SPRITE_SZ, false, 1.0));
+            self.divine_unit_sprites_flip[d] = gfx.create_bitmap(usz, usz, &load_raw_sprite_bgra(RAW_DIVINE_UNIT_SPRITES[d], UNIT_SPRITE_SZ, true, 1.0));
+        }
+        for d in 0..2 {
+            self.divine_bld_sprites[d] = gfx.create_bitmap(bsz, bsz, &load_raw_sprite_bgra(RAW_DIVINE_BLD_SPRITES[d], BLD_SPRITE_SZ, false, 1.0));
+            self.divine_bld_sprites_fog[d] = gfx.create_bitmap(bsz, bsz, &load_raw_sprite_bgra(RAW_DIVINE_BLD_SPRITES[d], BLD_SPRITE_SZ, false, 0.55));
+        }
+    }
+
+    pub fn hero_sprite(&self, hero_idx: usize, flip_x: bool) -> Option<&ID2D1Bitmap> {
+        if hero_idx >= self.hero_sprites.len() {
+            return None;
+        }
+        if flip_x {
+            self.hero_sprites_flip[hero_idx].as_ref()
+        } else {
+            self.hero_sprites[hero_idx].as_ref()
+        }
+    }
+
+    pub fn divine_unit_sprite(&self, k: UnitKind, flip_x: bool) -> Option<&ID2D1Bitmap> {
+        let idx = match k {
+            UnitKind::Chariot => 1,
+            _ => 0,
+        };
+        if flip_x {
+            self.divine_unit_sprites_flip[idx].as_ref()
+        } else {
+            self.divine_unit_sprites[idx].as_ref()
+        }
+    }
+
+    pub fn divine_bld_sprite(&self, k: BKind, fogged: bool) -> Option<&ID2D1Bitmap> {
+        let idx = match k {
+            BKind::Capital => 0,
+            _ => 1,
+        };
+        if fogged {
+            self.divine_bld_sprites_fog[idx].as_ref()
+        } else {
+            self.divine_bld_sprites[idx].as_ref()
         }
     }
 

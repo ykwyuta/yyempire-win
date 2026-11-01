@@ -1,4 +1,4 @@
-﻿//! ゲーム世界のシミュレーション（ユニット・建物・経済・戦闘・外交・イベント）
+//! ゲーム世界のシミュレーション（ユニット・建物・経済・戦闘・外交・イベント）
 
 use crate::ai::AiState;
 use crate::geo::*;
@@ -11,11 +11,13 @@ mod trade;
 mod traits;
 mod descent;
 mod heroes;
+mod save;
 pub use history::{Chron, HKind, Person, HISTORY, INITIAL_HOUSE};
 pub use trade::*;
 pub use traits::*;
 pub use descent::*;
 pub use heroes::*;
+pub use save::SAVE_VERSION;
 
 #[derive(Clone, Copy, Default, Debug, PartialEq)]
 pub struct V2 {
@@ -373,6 +375,11 @@ impl Building {
     }
     pub fn done(&self) -> bool {
         self.progress >= 1.0
+    }
+    pub fn dist_to_footprint(&self, p: V2) -> f32 {
+        let cx = p.x.clamp(self.tx as f32, self.tx as f32 + 2.0);
+        let cy = p.y.clamp(self.ty as f32, self.ty as f32 + 2.0);
+        p.dist(v2(cx, cy))
     }
 }
 
@@ -1914,6 +1921,11 @@ impl World {
         let Some(u) = self.unit(h) else { return };
         let ni = u.nation as usize;
         let p = u.pos;
+        // 未完成で作業者のいない建物があれば最優先で建設に向かう
+        if let Some(bh) = self.unfinished_bld(ni, p) {
+            self.order_build(&[h], bh);
+            return;
+        }
         // 空いている田
         if let Some(f) = self.free_farm(ni, p) {
             self.order_gather(&[h], Src::Farm(f));
@@ -1929,6 +1941,57 @@ impl World {
         if let Some((x, y)) = self.nearest_forest_for(Some(ni), p, 14) {
             self.order_gather(&[h], Src::Forest(x, y));
         }
+    }
+
+    pub fn bld_builders(&self, bh: Handle) -> usize {
+        self.units.iter().filter(|u| u.alive && u.order == Order::Build(bh)).count()
+    }
+
+    pub fn unfinished_bld(&self, ni: usize, p: V2) -> Option<Handle> {
+        let mut best: Option<(f32, Handle)> = None;
+        for (i, b) in self.blds.iter().enumerate() {
+            if b.alive && b.nation as usize == ni && !b.done() {
+                let h = self.bh(i);
+                if self.bld_builders(h) == 0 {
+                    let d = b.center().dist(p);
+                    if best.map_or(true, |x| d < x.0) {
+                        best = Some((d, h));
+                    }
+                }
+            }
+        }
+        best.map(|b| b.1)
+    }
+
+    /// 建物へ接近する際の通行可能な目標地点を返す（2×2の通行不可タイル内部ではなく隣接する通行可能タイル上の点）
+    pub fn bld_approach_point(&self, bh: Handle, from: V2) -> V2 {
+        let Some(b) = self.bld(bh) else { return from };
+        let c = b.center();
+        if !b.kind.blocks() && self.passable_at(c) {
+            return c;
+        }
+        let mut best: Option<(f32, V2)> = None;
+        for dy in -1..=2 {
+            for dx in -1..=2 {
+                if dx >= 0 && dx <= 1 && dy >= 0 && dy <= 1 {
+                    continue;
+                }
+                let (x, y) = (b.tx + dx, b.ty + dy);
+                if !Map::inb(x, y) || !self.cost[Map::idx(x, y)].is_finite() {
+                    continue;
+                }
+                let tc = v2(x as f32 + 0.5, y as f32 + 0.5);
+                let bx = tc.x.clamp(b.tx as f32, b.tx as f32 + 2.0);
+                let by = tc.y.clamp(b.ty as f32, b.ty as f32 + 2.0);
+                let ap = tc + (v2(bx, by) - tc) * 0.35;
+                let corner_pen = if (dx == -1 || dx == 2) && (dy == -1 || dy == 2) { 0.45 } else { 0.0 };
+                let score = from.dist(ap) + corner_pen;
+                if best.map_or(true, |bs| score < bs.0) {
+                    best = Some((score, ap));
+                }
+            }
+        }
+        best.map(|bs| bs.1).unwrap_or(c)
     }
 
     pub fn farm_users(&self, f: Handle) -> usize {
@@ -2032,7 +2095,11 @@ impl World {
         }
         let gt = goal.tile();
         let pg = self.units[i].path_goal;
-        let same = (pg.0 - gt.0).abs().max((pg.1 - gt.1).abs()) <= 1;
+        let same = if self.units[i].path_done {
+            pg == gt
+        } else {
+            (pg.0 - gt.0).abs().max((pg.1 - gt.1).abs()) <= 1
+        };
         if !same {
             self.units[i].path.clear();
             self.request_path(i, gt);
@@ -2170,7 +2237,11 @@ impl World {
                         }
                     }
                 }
-                if d <= range {
+                let in_range = match t {
+                    Target::Bld(bh) => d <= range || self.bld(bh).map_or(false, |b| b.dist_to_footprint(pos) <= kind.range() + 0.35),
+                    Target::Unit(_) => d <= range,
+                };
+                if in_range {
                     self.units[i].dir = (tp - pos).norm();
                     if self.units[i].cooldown <= 0.0 {
                         self.units[i].cooldown = kind.cooldown();
@@ -2194,9 +2265,20 @@ impl World {
                             }
                         }
                     }
-                } else if self.nav(i, tp, range * 0.9, dt) && d > range + 0.5 {
-                    // 到達不能
-                    self.units[i].order = Order::Idle;
+                } else {
+                    let (nav_goal, nav_r) = match t {
+                        Target::Bld(bh) if kind.range() < 1.5 => (self.bld_approach_point(bh, pos), 0.45),
+                        _ => (tp, range * 0.9),
+                    };
+                    if self.nav(i, nav_goal, nav_r, dt) {
+                        let unreachable = match t {
+                            Target::Bld(bh) => d > range + 0.5 && self.bld(bh).map_or(true, |b| b.dist_to_footprint(self.units[i].pos) > kind.range() + 0.65),
+                            Target::Unit(_) => d > range + 0.5,
+                        };
+                        if unreachable {
+                            self.units[i].order = Order::Idle;
+                        }
+                    }
                 }
             }
             Order::Gather { src, phase } => self.update_gather(i, src, phase, dt),
@@ -2221,14 +2303,17 @@ impl World {
                     return;
                 }
                 let c = b.center();
-                let r = if b.kind.blocks() { 1.8 } else { 1.0 };
-                if self.nav(i, c, r, dt) {
-                    if self.units[i].pos.dist(c) > r + 0.6 {
-                        // 辿り着けなければ次の予約へ
-                        if !self.next_queued_build(i) {
-                            self.units[i].order = Order::Idle;
-                        }
-                        return;
+                let pos = self.units[i].pos;
+                let near = if b.kind.blocks() {
+                    b.dist_to_footprint(pos) <= 1.05
+                } else {
+                    pos.dist(c) <= 1.15 || b.dist_to_footprint(pos) <= 0.45
+                };
+                if near {
+                    self.units[i].path.clear();
+                    let d = (c - pos).norm();
+                    if d.len() > 0.0 {
+                        self.units[i].dir = d;
                     }
                     let pw = self.units[i].power;
                     let b = self.bld_mut(bh).unwrap();
@@ -2248,6 +2333,24 @@ impl World {
                         if ni == self.player {
                             let nm = self.bld(bh).unwrap().kind.name();
                             self.push_msg(format!("{}が完成した", nm), [0.7, 0.9, 1.0]);
+                        }
+                    }
+                } else {
+                    let ap = self.bld_approach_point(bh, pos);
+                    let nr = if b.kind.blocks() { 0.45 } else { 0.85 };
+                    if self.nav(i, ap, nr, dt) {
+                        let reached = self.bld(bh).map_or(false, |b| {
+                            if b.kind.blocks() {
+                                b.dist_to_footprint(self.units[i].pos) <= 1.25
+                            } else {
+                                self.units[i].pos.dist(b.center()) <= 1.5 || b.dist_to_footprint(self.units[i].pos) <= 0.75
+                            }
+                        });
+                        if !reached {
+                            // 辿り着けなければ次の予約へ
+                            if !self.next_queued_build(i) {
+                                self.units[i].order = Order::Idle;
+                            }
                         }
                     }
                 }
@@ -2346,16 +2449,18 @@ impl World {
                     self.units[i].order = Order::Idle;
                     return;
                 };
-                let c = self.blds[di].center();
-                if self.nav(i, c, 1.9, dt) {
-                    if self.units[i].pos.dist(c) <= 2.6 {
-                        let carry = self.units[i].carry * self.nations[ni].eco_mul * self.nations[ni].tm.eco;
-                        let k = self.units[i].carry_kind;
-                        self.nations[ni].res[k] += carry;
-                        self.nations[ni].earned[k] += carry;
-                        self.units[i].carry = 0.0;
-                        self.units[i].order = if valid { Order::Gather { src, phase: 0 } } else { Order::Gather { src, phase: 0 } };
-                    } else {
+                let dh = self.bh(di);
+                if self.blds[di].dist_to_footprint(p) <= 1.15 {
+                    self.units[i].path.clear();
+                    let carry = self.units[i].carry * self.nations[ni].eco_mul * self.nations[ni].tm.eco;
+                    let k = self.units[i].carry_kind;
+                    self.nations[ni].res[k] += carry;
+                    self.nations[ni].earned[k] += carry;
+                    self.units[i].carry = 0.0;
+                    self.units[i].order = Order::Gather { src, phase: 0 };
+                } else {
+                    let ap = self.bld_approach_point(dh, p);
+                    if self.nav(i, ap, 0.5, dt) && self.blds[di].dist_to_footprint(self.units[i].pos) > 1.35 {
                         self.units[i].order = Order::Idle;
                     }
                 }
@@ -3009,5 +3114,68 @@ mod tests {
             }
         }
         println!("elapsed {:.1}s for {} steps", t0.elapsed().as_secs_f32(), steps);
+    }
+
+    #[test]
+    fn resume_interrupted_build() {
+        let mut w = World::new(12345);
+        let pl = 0;
+        w.player = pl;
+        w.nations[pl].res = [900.0, 900.0, 900.0];
+        let home = w.nations[pl].home;
+        let (hx, hy) = home.tile();
+        let worker = (0..w.units.len())
+            .find(|&i| w.units[i].alive && w.units[i].nation as usize == pl && w.units[i].kind == UnitKind::Worker)
+            .map(|i| w.uh(i))
+            .unwrap();
+
+        for kind in [BKind::Barracks, BKind::Farm] {
+            let mut placed = None;
+            for dy in -5..=5 {
+                for dx in -5..=5 {
+                    if let Ok(bh) = w.place_building(pl, kind, hx + dx, hy + dy) {
+                        placed = Some(bh);
+                        break;
+                    }
+                }
+                if placed.is_some() {
+                    break;
+                }
+            }
+            let bh = placed.expect("should place building");
+            let c = w.bld(bh).unwrap().center();
+
+            // 1) 東側（x + 3.5）から建設開始 → 途中で移動中断 → 南東・南・北西から再開して完成するか検証
+            for &(ox, oy) in &[(3.5f32, 0.5f32), (2.2, 2.2), (0.5, 3.6), (-1.8, -1.8)] {
+                let start_pos = v2(c.x + ox, c.y + oy);
+                if w.passable_at(start_pos) {
+                    w.unit_mut(worker).unwrap().pos = start_pos;
+                }
+                w.order_build(&[worker], bh);
+                for _ in 0..80 {
+                    w.step();
+                }
+                let prog_before = w.bld(bh).unwrap().progress;
+                assert!(prog_before > 0.02, "{:?} progress should advance from offset {:?}, got {}", kind, (ox, oy), prog_before);
+                if w.bld(bh).unwrap().done() {
+                    break;
+                }
+                // 中断（別の場所へ移動命令＋停止）
+                w.order_move(&[worker], start_pos, false);
+                for _ in 0..15 {
+                    w.step();
+                }
+                w.unit_mut(worker).unwrap().order = Order::Idle;
+                // 再開
+                w.order_build(&[worker], bh);
+            }
+            for _ in 0..900 {
+                if w.bld(bh).unwrap().done() {
+                    break;
+                }
+                w.step();
+            }
+            assert!(w.bld(bh).unwrap().done(), "{:?} should complete after resuming construction", kind);
+        }
     }
 }
