@@ -119,16 +119,25 @@ fn main() -> Result<()> {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         let inst = GetModuleHandleW(None)?;
         let class = w!("YYEmpireWnd");
-        let wc = WNDCLASSW {
+        // アプリのアイコン（build.rs が assets/app_icon.ico を資源番号1として埋め込む）
+        let icon = |sx: i32, sy: i32| -> HICON {
+            LoadImageW(Some(inst.into()), PCWSTR(1 as *const u16), IMAGE_ICON, sx, sy, LR_DEFAULTCOLOR)
+                .map(|h| HICON(h.0))
+                .unwrap_or_default()
+        };
+        let wc = WNDCLASSEXW {
+            cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
             style: CS_HREDRAW | CS_VREDRAW,
             lpfnWndProc: Some(wndproc),
             hInstance: inst.into(),
+            hIcon: icon(GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON)),
+            hIconSm: icon(GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON)),
             hCursor: LoadCursorW(None, IDC_ARROW)?,
             hbrBackground: HBRUSH(GetStockObject(BLACK_BRUSH).0),
             lpszClassName: class,
             ..Default::default()
         };
-        RegisterClassW(&wc);
+        RegisterClassExW(&wc);
         let (w, h) = (1600, 900);
         let mut rc = RECT { left: 0, top: 0, right: w, bottom: h };
         let _ = AdjustWindowRect(&mut rc, WS_OVERLAPPEDWINDOW, false);
