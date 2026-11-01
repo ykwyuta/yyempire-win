@@ -216,7 +216,6 @@ impl Game {
             x1: w,
             y1: h,
             label: BLOCK_LABEL.to_string(),
-            sub: String::new(),
             key: 0,
             enabled: false,
             act: Act::Noop,

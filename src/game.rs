@@ -108,7 +108,6 @@ enum Act {
     /// 和睦の申し入れへの返答（true=受諾）
     PeaceAnswer(bool),
     Start,
-    PickNation(usize),
     Home,
     Restart,
     CloseOverlay,
@@ -145,7 +144,6 @@ struct Button {
     x1: f32,
     y1: f32,
     label: String,
-    sub: String,
     key: u32,
     enabled: bool,
     act: Act,
@@ -1746,7 +1744,6 @@ impl Game {
         let pl = self.world.player;
         match a {
             Act::Noop => {}
-            Act::PickNation(i) => self.title_sel = Some(i),
             Act::Start => {
                 if let Some(n) = self.title_sel {
                     self.world.player = n;
@@ -2790,7 +2787,7 @@ impl Game {
         if hover && !tip.is_empty() {
             self.notice = None;
         }
-        self.buttons.push(Button { x0, y0, x1, y1, label: label.to_string(), sub: sub.to_string(), key, enabled, act, tip: tip.to_string() });
+        self.buttons.push(Button { x0, y0, x1, y1, label: label.to_string(), key, enabled, act, tip: tip.to_string() });
     }
 
     fn cost_str(c: [f32; 3]) -> String {
@@ -2895,7 +2892,6 @@ impl Game {
                     x1: w - 30.0,
                     y1: 514.0,
                     label: String::new(),
-                    sub: String::new(),
                     key: 0,
                     enabled: true,
                     act: Act::Noop,
@@ -2984,7 +2980,6 @@ impl Game {
             x1: x + 88.0,
             y1: 32.0,
             label: String::new(),
-            sub: String::new(),
             key: 0,
             enabled: true,
             act: Act::SelectAllWorkers,
@@ -3006,7 +3001,6 @@ impl Game {
             x1: x + 88.0,
             y1: 32.0,
             label: String::new(),
-            sub: String::new(),
             key: 0,
             enabled: true,
             act: Act::SelectAllMilitary,
@@ -3035,7 +3029,6 @@ impl Game {
             x1: x + 136.0,
             y1: 32.0,
             label: String::new(),
-            sub: String::new(),
             key: 0,
             enabled: true,
             act: Act::Market,
@@ -3375,7 +3368,6 @@ impl Game {
                         x1: bx1,
                         y1: by1,
                         label: String::new(),
-                        sub: String::new(),
                         key: 0,
                         enabled: true,
                         act: Act::FilterKind(kinds[k]),
@@ -3525,7 +3517,6 @@ impl Game {
                     x1: bx1,
                     y1: by1,
                     label: String::new(),
-                    sub: String::new(),
                     key: 0,
                     enabled: cnt[k] > 0,
                     act: Act::SelectKind(kinds[k]),

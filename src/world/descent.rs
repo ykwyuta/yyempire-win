@@ -27,11 +27,6 @@ impl World {
         self.descent.as_ref().map(|d| (d.start + DESCENT_YEARS - self.years).max(0.0))
     }
 
-    /// 上帝の兵か
-    pub fn divine(&self, i: usize) -> bool {
-        self.units[i].divine
-    }
-
     /// 前221年：上帝が秦に降臨する
     pub(super) fn begin_descent(&mut self) {
         let mut revived = false;

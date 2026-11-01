@@ -131,16 +131,6 @@ pub struct Caravan {
     pub value: f32,
 }
 
-impl Caravan {
-    pub fn label(&self) -> &'static str {
-        match self.kind {
-            CaravanKind::Merchant => t!("商人", "Merchant", "商人"),
-            CaravanKind::Western(_) => t!("西域の商人", "Western merchant", "西域商人"),
-            CaravanKind::Tribe(t) => tx(TRIBES[t as usize].name),
-        }
-    }
-}
-
 /// 交易全体の状態
 pub struct Trade {
     pub caravans: Vec<Caravan>,
