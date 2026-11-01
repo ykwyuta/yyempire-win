@@ -284,6 +284,9 @@ fn think(w: &mut World, n: usize, a: &mut AiState) {
 
     // ---- 軍の指揮
     command_army(w, n, a, &soldiers);
+
+    // ---- 英霊召喚（民を生贄にするので最後に）
+    w.ai_summon(n, &mut a.rng);
 }
 
 fn diplomacy(w: &mut World, n: usize, a: &mut AiState, nsold: usize) {

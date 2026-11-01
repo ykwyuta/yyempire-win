@@ -10,10 +10,12 @@ mod history;
 mod trade;
 mod traits;
 mod descent;
+mod heroes;
 pub use history::{Chron, HKind, Person, HISTORY, INITIAL_HOUSE};
 pub use trade::*;
 pub use traits::*;
 pub use descent::*;
+pub use heroes::*;
 
 #[derive(Clone, Copy, Default, Debug, PartialEq)]
 pub struct V2 {
@@ -320,8 +322,10 @@ pub struct Unit {
     pub tribe: u8,
     /// 傭兵の契約満了年（0=傭兵ではない）
     pub merc_until: f32,
-    /// 上帝の兵（傷つかない）
+    /// 上帝の兵（英霊にしか傷つけられない）
     pub divine: bool,
+    /// 英霊（HEROES の番号、NONE=英霊ではない）
+    pub hero: u8,
 }
 
 impl Unit {
@@ -489,6 +493,8 @@ pub struct World {
     pub descent: Option<Descent>,
     /// 撮影用：プレイヤーの国も AI が動かす
     pub ai_player: bool,
+    /// 英霊モード（ゲーム開始時に選ぶ。既定は無効）
+    pub heroic: bool,
     pub time: f32,
     pub ai: Vec<AiState>,
     /// 商人・西域の商人・山岳民と遊牧民
@@ -544,6 +550,7 @@ impl World {
             player_orders: 0,
             descent: None,
             ai_player: false,
+            heroic: false,
             time: 0.0,
             ai: Vec::new(),
             trade: Trade::new(&mut Rng::new(seed as u64 * 13 + 5)),
@@ -736,6 +743,7 @@ impl World {
             tribe: NONE,
             merc_until: 0.0,
             divine: false,
+            hero: NONE,
         };
         if let Some(i) = self.free_units.pop() {
             let gen = self.units[i as usize].gen + 1;
@@ -1070,7 +1078,7 @@ impl World {
                 continue;
             }
             let n = &mut self.nations[u.nation as usize];
-            if u.merc_until > 0.0 || u.divine {
+            if u.merc_until > 0.0 || u.divine || u.hero != NONE {
                 // 傭兵は銭で雇われており、上帝の兵は天のもの。兵数の上限・維持費の外
                 n.mil_power += u.power * (u.hp / u.max_hp()).max(0.2);
             } else if u.kind.military() {
@@ -1251,6 +1259,9 @@ impl World {
         if u.merc_until > 0.0 {
             return Err("傭兵は鍛錬できない");
         }
+        if u.hero != NONE {
+            return Err("英霊は鍛錬できない");
+        }
         if u.power + 0.01 >= cap {
             return Err("この時代の能力上限に達している");
         }
@@ -1275,6 +1286,9 @@ impl World {
         let Some(u) = self.unit(h) else { return Err("") };
         if u.merc_until > 0.0 {
             return Err("傭兵は民にできない");
+        }
+        if u.hero != NONE {
+            return Err("英霊は民にできない");
         }
         let ni = u.nation as usize;
         let n = &self.nations[ni];
@@ -1444,13 +1458,15 @@ impl World {
     // ------------------------------------------------------------ 戦闘
     fn damage_unit(&mut self, ti: usize, dmg: f32, attacker: Option<Handle>, an: usize) {
         let killed;
+        // 上帝の兵を傷つけられるのは英霊だけ
+        let by_hero = attacker.and_then(|h| self.unit(h)).map_or(false, |a| a.hero != NONE);
         {
             let u = &mut self.units[ti];
-            // 上帝の兵は傷つかない
-            if !u.alive || u.divine {
+            if !u.alive || (u.divine && !by_hero) {
                 return;
             }
-            u.hp -= dmg;
+            // 英霊の一撃は上帝の兵によく効く
+            u.hp -= if u.divine { dmg * 3.0 } else { dmg };
             u.flash = 0.15;
             u.last_attacker = attacker;
             killed = u.hp <= 0.0;
@@ -1679,7 +1695,10 @@ impl World {
             n.aggression = (n.aggression - dt * 2.0 / spy).max(0.0);
         }
         for u in self.units.iter_mut() {
-            if u.alive && u.kind.military() && !u.divine && starving[u.nation as usize] {
+            if u.alive && u.hero != NONE {
+                // 英霊は傷が癒える
+                u.hp = (u.hp + u.max_hp() * 0.015 * dt).min(u.max_hp());
+            } else if u.alive && u.kind.military() && !u.divine && starving[u.nation as usize] {
                 u.hp -= u.max_hp() * 0.01 * dt;
             }
         }
@@ -2575,6 +2594,74 @@ mod tests {
         assert!(matches!(&w.game_over, Some((false, _))));
     }
 
+    /// 英霊：民を生贄に呼び、能力は生贄の合計×倍率。一国一体。上帝の兵を傷つけられるのは英霊だけ
+    #[test]
+    fn hero_summon_rules() {
+        let mut w = World::new(12345);
+        let qi = 4;
+        let workers: Vec<Handle> = (0..w.units.len()).filter(|&i| w.units[i].alive && w.units[i].nation as usize == qi && w.units[i].kind == UnitKind::Worker).map(|i| w.uh(i)).collect();
+        assert!(w.summon_hero(qi, 3, &workers).is_err(), "英霊モードでなければ呼べない");
+        w.heroic = true;
+        let (v, p) = w.sacrifice_power(qi, &workers);
+        let before = w.units.iter().filter(|u| u.alive && u.nation as usize == qi && u.kind == UnitKind::Worker).count();
+        let h = w.summon_hero(qi, 3, &workers).expect("召喚できない");
+        let hero = w.unit(h).unwrap();
+        assert_eq!(hero.hero, 3);
+        assert!((hero.power - p * HEROES[3].mult).abs() < 1e-3);
+        let after = w.units.iter().filter(|u| u.alive && u.nation as usize == qi && u.kind == UnitKind::Worker).count();
+        assert_eq!(after, before - v.len(), "生贄の民が残っている");
+        // 一国一体、同じ英霊は二国に現れない
+        let more: Vec<Handle> = (0..w.units.len()).filter(|&i| w.units[i].alive && w.units[i].nation as usize == qi).map(|i| w.uh(i)).collect();
+        assert!(w.can_summon(qi, 5, &more).is_err());
+        let chu = 3;
+        let cw: Vec<Handle> = (0..w.units.len()).filter(|&i| w.units[i].alive && w.units[i].nation as usize == chu && w.units[i].kind == UnitKind::Worker).map(|i| w.uh(i)).collect();
+        assert!(w.can_summon(chu, 3, &cw).is_err(), "黄帝が二国に現れた");
+        assert!(w.can_summon(chu, 4, &cw).is_ok());
+        // 上帝の兵：普通の兵では傷つかず、英霊なら傷つく
+        let pos = w.unit(h).unwrap().pos;
+        let g = w.spawn_unit(2, UnitKind::Infantry, pos, 12.0);
+        w.unit_mut(g).unwrap().divine = true;
+        let gi = g.idx as usize;
+        let hp0 = w.units[gi].hp;
+        let soldier = (0..w.units.len()).find(|&i| w.units[i].alive && w.units[i].nation as usize == chu && w.units[i].kind.military()).unwrap();
+        let sh = w.uh(soldier);
+        w.damage_unit(gi, 100.0, Some(sh), chu);
+        assert_eq!(w.units[gi].hp, hp0);
+        w.damage_unit(gi, 100.0, Some(h), qi);
+        assert!(w.units[gi].hp < hp0);
+        // 英霊の近くの城邑は守られる
+        let cap = w.nations[qi].capital.unwrap().idx as usize;
+        let c = w.blds[cap].center();
+        w.unit_mut(h).unwrap().pos = c;
+        assert!(w.hero_guarded(cap));
+    }
+
+    /// 英霊モード：上帝降臨から10年後、版図が上帝の秦より広ければ勝利（秦を滅ぼした場合）
+    #[test]
+    fn heroic_win_by_territory() {
+        let mut w = World::new(12345);
+        w.heroic = true;
+        w.player = 4;
+        w.era = Era::Warring;
+        w.years = START_BC - 221.0;
+        w.begin_descent();
+        // 英霊の軍が秦を滅ぼした
+        w.eliminate(2, 4);
+        w.game_over = None;
+        w.descent.as_mut().unwrap().start = w.years - DESCENT_YEARS - 0.5;
+        w.yearly_descent();
+        assert!(matches!(&w.game_over, Some((true, _))), "{:?}", w.game_over);
+        // 英霊モードでなければ、同じ状況でも勝利にはならない
+        let mut w = World::new(12345);
+        w.player = 4;
+        w.era = Era::Warring;
+        w.years = START_BC - 221.0;
+        w.begin_descent();
+        w.descent.as_mut().unwrap().start = w.years - DESCENT_YEARS - 0.5;
+        w.yearly_descent();
+        assert!(matches!(&w.game_over, Some((false, _))) || !w.nations[4].alive);
+    }
+
     /// 全 AI で長期間シミュレーションし、国家の推移とイベントを確認する
     #[test]
     fn long_sim() {
@@ -2583,6 +2670,7 @@ mod tests {
         w.player = 999usize.min(w.nations.len() - 1);
         // プレイヤー不在扱い：最後の国（韓、休眠）をプレイヤーにする
         w.player = HAN;
+        w.heroic = std::env::var("SIM_HEROIC").is_ok();
         let t0 = std::time::Instant::now();
         let years = std::env::var("SIM_YEARS").ok().and_then(|s| s.parse().ok()).unwrap_or(560.0f32);
         let mut next_report = 0.0;
