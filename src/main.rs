@@ -7,7 +7,9 @@ mod game;
 mod geo;
 mod gfx;
 mod path;
+mod platform;
 mod rng;
+mod save;
 mod world;
 
 use std::cell::RefCell;
