@@ -9,7 +9,7 @@ use crate::ai::AiState;
 use crate::save::{RResult, Reader, Writer};
 
 /// 記録形式の版（中身の並びを変えたら上げる）
-pub const SAVE_VERSION: u32 = 2;
+pub const SAVE_VERSION: u32 = 3;
 
 fn bad(what: &str) -> String {
     tf!("記録が壊れている（{}）", "The save is damaged ({})", "存档已损坏（{}）", what)
@@ -342,6 +342,7 @@ impl World {
             w.f32(nt.coin_earned);
             w.f32(nt.coin_income);
             w.u8(nt.tax);
+            w.u32(nt.cap_bonus);
         }
         // ---- 外交
         let nn = NATIONS.len();
@@ -663,6 +664,7 @@ impl World {
             nt.coin_earned = r.f32()?;
             nt.coin_income = r.f32()?;
             nt.tax = r.u8()?.min(2);
+            nt.cap_bonus = r.u32()?.min(10_000);
         }
         // ---- 外交
         let nn = NATIONS.len();

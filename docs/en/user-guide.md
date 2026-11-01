@@ -137,7 +137,7 @@ There are three **resources**.
 
 Buildings go inside your own territory. Select a worker, press Q, W or E in the command panel (field, barracks, town), then click where to build. Hold **Ctrl** while placing to reserve builds and keep placing more. The selected workers finish their current build, then build the reserved sites in the order you placed them (each site shows its number). Giving them another order, such as a move, cancels the reservations. With only workers selected, R builds a fort (the button takes the place of Stop). Forts are a good use for surplus resources.
 
-**Worker and soldier limits** are each 4 + 3 × your number of cities (25 at most). More towns mean a bigger state.
+**Worker and soldier limits** are each 4 + 3 × your number of cities (25 at most). When a state falls, its allowance (4, plus whatever it had received) is shared among the surviving states, the conqueror first, and added on top of that limit, even past 25. More towns mean a bigger state.
 
 Handy commands:
 - **Auto gather (F, 自動採集)**: spreads the selected workers over free fields, forests and mines.

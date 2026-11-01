@@ -215,6 +215,9 @@ pub enum BKind {
     Fort,
 }
 
+/// 城邑が無くても持てる民・兵の数（滅んだ国から分けられる量）
+pub const BASE_CAP: u32 = 4;
+
 /// 要塞の射程・攻撃間隔
 pub const FORT_RANGE: f32 = 9.0;
 pub const FORT_COOLDOWN: f32 = 1.5;
@@ -425,14 +428,16 @@ pub struct Nation {
     pub tax: u8,
     /// 国の特徴による補正
     pub tm: TraitMods,
+    /// 滅んだ国から分けられた人口上限（民・兵それぞれに加わる）
+    pub cap_bonus: u32,
 }
 
 impl Nation {
     pub fn worker_cap(&self) -> u32 {
-        (4 + 3 * self.cities).min(25)
+        (4 + 3 * self.cities).min(25) + self.cap_bonus
     }
     pub fn mil_cap(&self) -> u32 {
-        (4 + 3 * self.cities).min(25)
+        (4 + 3 * self.cities).min(25) + self.cap_bonus
     }
     /// 築ける要塞の数（城邑2つごとに1つ、最大6）
     pub fn fort_cap(&self) -> u32 {
@@ -521,6 +526,12 @@ pub struct World {
     pub grid: Vec<Vec<u32>>,
     pub territory_dirty: bool,
     pub territory_version: u32,
+    /// 国ごとの領土のマス数（recompute_territory で数え直す）
+    tile_count: Vec<u32>,
+    /// 国ごとの完成した城邑（毎ステップ作り直す。運び先を探すのに全建物を見ないため）
+    city_list: Vec<Vec<u32>>,
+    /// 押し合いを1ステップおきにするための拍子
+    sep_tick: bool,
     pub terrain_dirty: Vec<(i32, i32)>,
     pub game_over: Option<(bool, String)>,
     /// チュートリアル中はプレイヤーへの宣戦を禁じる
@@ -556,6 +567,9 @@ impl World {
             cost,
             bmap: vec![0; n],
             owner: vec![NONE; n],
+            tile_count: Vec::new(),
+            city_list: Vec::new(),
+            sep_tick: false,
             units: Vec::new(),
             blds: Vec::new(),
             free_units: Vec::new(),
@@ -633,6 +647,7 @@ impl World {
                 coin_income: 0.0,
                 tax: 1,
                 tm: TraitMods::NONE,
+                cap_bonus: 0,
             });
             w.ai.push(AiState::new(i as u64 * 31 + seed as u64));
         }
@@ -670,6 +685,7 @@ impl World {
             coin_income: 0.0,
             tax: 1,
             tm: TraitMods::NONE,
+            cap_bonus: 0,
         });
         for i in 0..nn {
             let d = &NATIONS[i];
@@ -1144,6 +1160,13 @@ impl World {
                 }
             }
         }
+        let mut tc = vec![0u32; self.nations.len()];
+        for &o in self.owner.iter() {
+            if (o as usize) < tc.len() {
+                tc[o as usize] += 1;
+            }
+        }
+        self.tile_count = tc;
         self.territory_dirty = false;
         self.territory_version += 1;
     }
@@ -1194,10 +1217,8 @@ impl World {
                 }
             }
         }
-        for &o in self.owner.iter() {
-            if o != NONE {
-                self.nations[o as usize].tiles += 1;
-            }
+        for (k, n) in self.nations.iter_mut().enumerate() {
+            n.tiles = self.tile_count.get(k).copied().unwrap_or(0);
         }
         for n in self.nations.iter_mut() {
             n.upkeep *= n.tm.upkeep;
@@ -1512,9 +1533,33 @@ impl World {
         best.map(|b| b.1)
     }
 
+    /// 国ごとの完成した城邑の一覧を作り直す
+    fn rebuild_city_list(&mut self) {
+        let n = self.nations.len();
+        if self.city_list.len() != n {
+            self.city_list = vec![Vec::new(); n];
+        }
+        for l in self.city_list.iter_mut() {
+            l.clear();
+        }
+        for (i, b) in self.blds.iter().enumerate() {
+            if b.alive && b.kind.city() && b.done() {
+                if let Some(l) = self.city_list.get_mut(b.nation as usize) {
+                    l.push(i as u32);
+                }
+            }
+        }
+    }
+
     pub fn nearest_dropsite(&self, nation: usize, p: V2) -> Option<usize> {
         let mut best: Option<(f32, usize)> = None;
-        for (i, b) in self.blds.iter().enumerate() {
+        // 一覧は毎ステップ作り直すが、途中で落ちた城邑は確かめて除く
+        let list: Vec<usize> = match self.city_list.get(nation) {
+            Some(l) => l.iter().map(|&i| i as usize).collect(),
+            None => (0..self.blds.len()).collect(),
+        };
+        for i in list {
+            let b = &self.blds[i];
             if b.alive && b.nation as usize == nation && b.kind.city() && b.done() {
                 let d = b.center().dist(p);
                 if best.map_or(true, |x| d < x.0) {
@@ -1745,6 +1790,7 @@ impl World {
             self.war[n][o] = false;
             self.war[o][n] = false;
         }
+        self.share_cap(n, by);
         let by_name = if by < self.nations.len() { tx(self.nations[by].name) } else { "?" };
         let text = tf!("{} は {} に滅ぼされた", "{} was destroyed by {}", "{}被{}所灭", tx(self.nations[n].name), by_name);
         self.push_msg(text, [1.0, 0.8, 0.3]);
@@ -1755,6 +1801,37 @@ impl World {
                 tf!("{} は {} に滅ぼされた……", "{} was destroyed by {}...", "{}被{}所灭……", tx(self.nations[n].name), by_name)
             };
             self.game_over = Some((false, t));
+        }
+    }
+
+    /// 滅んだ国の人口上限（基本の4と、それまでに分けられた分）を生き残った国に分ける。
+    /// 等分し、余りは攻め滅ぼした国、次いで国力の高い国から順に1ずつ
+    fn share_cap(&mut self, n: usize, by: usize) {
+        let pts = BASE_CAP + self.nations[n].cap_bonus;
+        self.nations[n].cap_bonus = 0;
+        let mut order: Vec<usize> = (0..NATIONS.len()).filter(|&i| i != n && self.nations[i].alive).collect();
+        if order.is_empty() {
+            return;
+        }
+        order.sort_by(|&a, &b| self.nations[b].strength.partial_cmp(&self.nations[a].strength).unwrap());
+        if let Some(k) = order.iter().position(|&i| i == by) {
+            let c = order.remove(k);
+            order.insert(0, c);
+        }
+        let (each, rest) = (pts / order.len() as u32, pts as usize % order.len());
+        let mut mine = 0;
+        for (k, &i) in order.iter().enumerate() {
+            let add = each + if k < rest { 1 } else { 0 };
+            self.nations[i].cap_bonus += add;
+            if i == self.player {
+                mine = add;
+            }
+        }
+        if mine > 0 {
+            let p = self.player;
+            let cap = self.nations[p].worker_cap();
+            let t = tf!("{}の滅亡で、民・兵の上限がそれぞれ +{}（いま{}）", "With the fall of {}, our worker and soldier limits each rise by {} (now {})", "因{}灭亡，民与兵的上限各+{}（现为{}）", tx(self.nations[n].name), mine, cap);
+            self.push_msg(t, [0.7, 1.0, 0.8]);
         }
     }
 
@@ -1778,13 +1855,18 @@ impl World {
         self.economy(dt);
         self.update_trade(dt);
         self.update_buildings(dt);
+        self.rebuild_city_list();
         self.rebuild_grid();
         for i in 0..self.units.len() {
             if self.units[i].alive {
                 self.update_unit(i, dt);
             }
         }
-        self.separate(dt);
+        // 押し合いは1ステップおきに、2ステップ分の強さで（見た目は変わらず計算は半分）
+        self.sep_tick = !self.sep_tick;
+        if self.sep_tick {
+            self.separate(dt * 2.0);
+        }
         self.process_paths();
         for s in self.shots.iter_mut() {
             s.t -= dt;
@@ -2002,11 +2084,22 @@ impl World {
     }
 
     pub fn free_farm(&self, ni: usize, p: V2) -> Option<Handle> {
+        // 田ごとに全ユニットを数えると田の数×ユニット数になるので、先に使われている田を集める
+        let mut used = vec![false; self.blds.len()];
+        for u in self.units.iter() {
+            if let (true, Order::Gather { src: Src::Farm(h), .. }) = (u.alive, u.order) {
+                if let Some(x) = used.get_mut(h.idx as usize) {
+                    if self.blds[h.idx as usize].gen == h.gen {
+                        *x = true;
+                    }
+                }
+            }
+        }
         let mut best: Option<(f32, Handle)> = None;
         for (i, b) in self.blds.iter().enumerate() {
             if b.alive && b.nation as usize == ni && b.kind == BKind::Farm && b.done() {
                 let h = self.bh(i);
-                if self.farm_users(h) == 0 {
+                if !used[i] {
                     let d = b.center().dist(p);
                     if best.map_or(true, |x| d < x.0) {
                         best = Some((d, h));
@@ -2030,8 +2123,12 @@ impl World {
     }
 
     fn process_paths(&mut self) {
-        let t0 = std::time::Instant::now();
+        // 1ステップで展開してよいマスの数。実時間で区切ると機械の速さで結果が変わるので、仕事量で区切る
+        const BUDGET: usize = 30_000;
         let mut n = 0;
+        let mut spent = 0;
+        // 同じステップで、隣り合う地点から同じ目的地へ求めた経路は使い回す（部隊でまとめて動かすとき）
+        let mut memo: Vec<((i32, i32), (i32, i32), Vec<(i16, i16)>)> = Vec::new();
         while let Some(h) = self.path_queue.pop_front() {
             let i = h.idx as usize;
             if !(self.units[i].alive && self.units[i].gen == h.gen && self.units[i].path_pending) {
@@ -2039,15 +2136,26 @@ impl World {
             }
             let start = self.units[i].pos.tile();
             let goal = self.units[i].path_goal;
-            let r = if Map::inb(goal.0, goal.1) && self.cost[Map::idx(goal.0, goal.1)].is_finite() { 0 } else { 2 };
-            let path = self.pf.find(&self.cost, start, goal, r, 160000);
+            let pos = self.units[i].pos;
+            let reuse = memo.iter().find(|(s, g, p)| {
+                *g == goal && !p.is_empty() && (s.0 - start.0).abs().max((s.1 - start.1).abs()) <= 1 && self.line_clear(pos, v2(s.0 as f32 + 0.5, s.1 as f32 + 0.5))
+            });
+            let path = if let Some((_, _, p)) = reuse {
+                p.clone()
+            } else {
+                let r = if Map::inb(goal.0, goal.1) && self.cost[Map::idx(goal.0, goal.1)].is_finite() { 0 } else { 2 };
+                let p = self.pf.find(&self.cost, start, goal, r, 160000, crate::path::UNIT_WEIGHT);
+                spent += self.pf.last_exp;
+                memo.push((start, goal, p.clone()));
+                p
+            };
             let u = &mut self.units[i];
             u.path = path;
             u.path_i = 0;
             u.path_pending = false;
             u.path_done = u.path.is_empty();
             n += 1;
-            if n >= 4 && t0.elapsed().as_micros() > 2500 {
+            if n >= 4 && spent > BUDGET {
                 break;
             }
         }
@@ -2472,42 +2580,43 @@ impl World {
     }
 
     fn separate(&mut self, dt: f32) {
+        // 押し合いは 0.55 以内のユニット同士だけ。格子（4マス）のうち、その範囲にかかる升（たいてい1つ、多くて4つ）だけを見る
+        const R: f32 = 0.55;
         let mut pushes: Vec<(usize, V2)> = Vec::new();
-        for gy in 0..GH {
-            for gx in 0..GW {
-                let cell = &self.grid[(gy * GW + gx) as usize];
-                if cell.is_empty() {
-                    continue;
-                }
-                for &a in cell.iter() {
-                    let ua = &self.units[a as usize];
-                    if !ua.alive {
-                        continue;
-                    }
-                    let mut push = v2(0.0, 0.0);
-                    for ny in (gy - 1).max(0)..=(gy + 1).min(GH - 1) {
-                        for nx in (gx - 1).max(0)..=(gx + 1).min(GW - 1) {
-                            for &b in self.grid[(ny * GW + nx) as usize].iter() {
-                                if a == b {
-                                    continue;
-                                }
-                                let ub = &self.units[b as usize];
-                                if !ub.alive {
-                                    continue;
-                                }
-                                let d = ua.pos - ub.pos;
-                                let l = d.len();
-                                if l < 0.55 {
-                                    let dir = if l > 1e-4 { d * (1.0 / l) } else { v2(((a * 7) % 5) as f32 - 2.0, ((a * 3) % 5) as f32 - 2.0).norm() };
-                                    push = push + dir * (0.55 - l);
-                                }
-                            }
+        for a in 0..self.units.len() {
+            let ua = &self.units[a];
+            if !ua.alive {
+                continue;
+            }
+            let p = ua.pos;
+            let g0x = ((p.x - R) as i32 / GCELL).clamp(0, GW - 1);
+            let g1x = ((p.x + R) as i32 / GCELL).clamp(0, GW - 1);
+            let g0y = ((p.y - R) as i32 / GCELL).clamp(0, GH - 1);
+            let g1y = ((p.y + R) as i32 / GCELL).clamp(0, GH - 1);
+            let mut push = v2(0.0, 0.0);
+            for gy in g0y..=g1y {
+                for gx in g0x..=g1x {
+                    for &b in self.grid[(gy * GW + gx) as usize].iter() {
+                        let b = b as usize;
+                        if a == b {
+                            continue;
+                        }
+                        let ub = &self.units[b];
+                        if !ub.alive {
+                            continue;
+                        }
+                        let d = p - ub.pos;
+                        let l2 = d.x * d.x + d.y * d.y;
+                        if l2 < R * R {
+                            let l = l2.sqrt();
+                            let dir = if l > 1e-4 { d * (1.0 / l) } else { v2(((a * 7) % 5) as f32 - 2.0, ((a * 3) % 5) as f32 - 2.0).norm() };
+                            push = push + dir * (R - l);
                         }
                     }
-                    if push.len() > 0.0 {
-                        pushes.push((a as usize, push));
-                    }
                 }
+            }
+            if push.x != 0.0 || push.y != 0.0 {
+                pushes.push((a, push));
             }
         }
         for (i, p) in pushes {
@@ -2811,7 +2920,7 @@ mod tests {
         let a = w.nations[2].home.tile();
         let b = w.nations[23].home.tile();
         let mut pf = PathFinder::new();
-        let path = pf.find(&w.cost, a, b, 3, 200000);
+        let path = pf.find(&w.cost, a, b, 3, 200000, crate::path::UNIT_WEIGHT);
         let end = *path.last().unwrap();
         let reach = (end.0 as i32 - b.0).abs().max((end.1 as i32 - b.1).abs());
         println!("秦→蜀 経路長 {} 終点の距離 {}", path.len(), reach);
@@ -3033,6 +3142,30 @@ mod tests {
         assert!(c[1] == 0.0 && c[0] > c[2] && c[2] > 0.0, "{:?}", c);
     }
 
+    /// 国が滅ぶと、その国の人口上限が生き残った国に分けられる
+    #[test]
+    fn fallen_cap_is_shared() {
+        let mut w = World::new(12345);
+        w.player = 4;
+        let total = |w: &World| (0..NATIONS.len()).filter(|&i| w.nations[i].alive).map(|i| w.nations[i].cap_bonus).sum::<u32>();
+        assert_eq!(total(&w), 0);
+        let cap0 = w.nations[4].worker_cap();
+        // 斉（4）が莒（26）を滅ぼすと、斉に1つ以上分けられる
+        w.eliminate(26, 4);
+        assert_eq!(total(&w), BASE_CAP);
+        assert!(w.nations[4].cap_bonus >= 1);
+        assert_eq!(w.nations[4].worker_cap(), cap0 + w.nations[4].cap_bonus);
+        assert_eq!(w.nations[4].mil_cap(), w.nations[4].worker_cap());
+        // 分けられた分も、その国が滅べばまた分けられる（合計は減らない）
+        w.nations[5].cap_bonus += 6;
+        let before = total(&w);
+        w.eliminate(5, 4);
+        assert_eq!(total(&w), before + BASE_CAP);
+        // 上限25を超えても加わる
+        w.nations[4].cities = 20;
+        assert_eq!(w.nations[4].worker_cap(), 25 + w.nations[4].cap_bonus);
+    }
+
     /// 和睦はプレイヤーに選ばせる：拒否すれば交戦が続き、受諾すれば休戦する
     #[test]
     fn peace_needs_player_answer() {
@@ -3082,7 +3215,7 @@ mod tests {
                     .nations
                     .iter()
                     .filter(|n| n.alive)
-                    .map(|n| format!("{}(c{} w{} s{} p{:.0} 糧{:.0}木{:.0}銅{:.0})", n.name, n.cities, n.workers, n.soldiers, n.strength, n.res[0], n.res[1], n.res[2]))
+                    .map(|n| format!("{}(c{}+{} w{} s{} p{:.0} 糧{:.0}木{:.0}銅{:.0})", n.name, n.cities, n.cap_bonus, n.workers, n.soldiers, n.strength, n.res[0], n.res[1], n.res[2]))
                     .collect();
                 let units = w.units.iter().filter(|u| u.alive).count();
                 let forts = w.blds.iter().filter(|b| b.alive && b.kind == BKind::Fort && b.done()).count();
@@ -3117,6 +3250,7 @@ mod tests {
             }
         }
         println!("elapsed {:.1}s for {} steps", t0.elapsed().as_secs_f32(), steps);
+        let names = ["misc", "stats", "economy", "trade", "buildings", "grid", "units", "separate", "paths", "territory", "yearly", "ai"];
     }
 
     #[test]

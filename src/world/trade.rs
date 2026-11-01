@@ -336,7 +336,7 @@ impl World {
                 paths += 1;
                 let start = c.pos.tile();
                 let goal = c.goal.tile();
-                let path = self.pf.find(&self.cost, start, goal, 2, 160000);
+                let path = self.pf.find(&self.cost, start, goal, 2, 160000, crate::path::CARAVAN_WEIGHT);
                 let c = &mut self.trade.caravans[i];
                 c.path = path;
                 c.path_i = 0;
