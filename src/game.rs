@@ -356,43 +356,66 @@ impl Game {
         let w = &self.world;
         let os = OVERLAY_SCALE;
         let ow = MAP_W * os;
-        let diff_owner = |nx: i32, ny: i32, o: u8| -> bool {
-            if !Map::inb(nx, ny) {
-                return false;
+        let owner_at = |nx: i32, ny: i32| -> u8 {
+            let cx = nx.clamp(0, MAP_W as i32 - 1);
+            let cy = ny.clamp(0, MAP_H as i32 - 1);
+            let ni = Map::idx(cx, cy);
+            if w.map.terrain[ni] == Terrain::Sea {
+                NONE
+            } else {
+                w.owner[ni]
             }
-            let ni = Map::idx(nx, ny);
-            w.owner[ni] != o && w.map.terrain[ni] != Terrain::Sea
         };
         for y in 0..MAP_H as i32 {
             for x in 0..MAP_W as i32 {
-                let i = Map::idx(x, y);
-                let o = w.owner[i];
-                if o == NONE {
-                    for sy in 0..os {
-                        for sx in 0..os {
-                            self.overlay_px[(y as usize * os + sy) * ow + x as usize * os + sx] = 0;
-                        }
-                    }
-                    continue;
-                }
-                let b_l = diff_owner(x - 1, y, o);
-                let b_r = diff_owner(x + 1, y, o);
-                let b_t = diff_owner(x, y - 1, o);
-                let b_b = diff_owner(x, y + 1, o);
-                let c = w.nations[o as usize].color;
-                let col_edge = rgba([c[0].min(1.0), c[1].min(1.0), c[2].min(1.0)], 0.88);
-                let col_glow = rgba(c, 0.36);
-                let col_fill = rgba(c, 0.11);
+                let o = owner_at(x, y);
                 for sy in 0..os {
                     for sx in 0..os {
-                        let on_edge = (b_l && sx == 0) || (b_r && sx == os - 1) || (b_t && sy == 0) || (b_b && sy == os - 1);
-                        let on_glow = (b_l && sx == 1) || (b_r && sx + 2 == os) || (b_t && sy == 1) || (b_b && sy + 2 == os);
-                        let px = if on_edge {
-                            col_edge
-                        } else if on_glow {
-                            col_glow
+                        let fx = x as f32 + (sx as f32 + 0.5) / os as f32 - 0.5;
+                        let fy = y as f32 + (sy as f32 + 0.5) / os as f32 - 0.5;
+                        let x0 = fx.floor() as i32;
+                        let y0 = fy.floor() as i32;
+                        let tx = fx - x0 as f32;
+                        let ty = fy - y0 as f32;
+                        let ux = tx * tx * (3.0 - 2.0 * tx);
+                        let uy = ty * ty * (3.0 - 2.0 * ty);
+
+                        let o00 = owner_at(x0, y0);
+                        let o10 = owner_at(x0 + 1, y0);
+                        let o01 = owner_at(x0, y0 + 1);
+                        let o11 = owner_at(x0 + 1, y0 + 1);
+
+                        // 最も近い有効な領主を決定
+                        let dom = if o != NONE {
+                            o
+                        } else if o00 != NONE {
+                            o00
+                        } else if o10 != NONE {
+                            o10
+                        } else if o01 != NONE {
+                            o01
                         } else {
-                            col_fill
+                            o11
+                        };
+                        if dom == NONE {
+                            self.overlay_px[(y as usize * os + sy) * ow + x as usize * os + sx] = 0;
+                            continue;
+                        }
+                        let w00 = if o00 == dom { 1.0 } else { 0.0 };
+                        let w10 = if o10 == dom { 1.0 } else { 0.0 };
+                        let w01 = if o01 == dom { 1.0 } else { 0.0 };
+                        let w11 = if o11 == dom { 1.0 } else { 0.0 };
+                        let wt = (w00 * (1.0 - ux) + w10 * ux) * (1.0 - uy) + (w01 * (1.0 - ux) + w11 * ux) * uy;
+
+                        let c = w.nations[dom as usize].color;
+                        let px = if wt < 0.36 {
+                            0
+                        } else if wt < 0.60 {
+                            rgba([c[0].min(1.0), c[1].min(1.0), c[2].min(1.0)], 0.86)
+                        } else if wt < 0.80 {
+                            rgba(c, 0.30)
+                        } else {
+                            rgba(c, 0.065)
                         };
                         self.overlay_px[(y as usize * os + sy) * ow + x as usize * os + sx] = px;
                     }
@@ -1808,16 +1831,6 @@ impl Game {
             let sel = self.sel_b == Some(wd.bh(bi));
             if sel {
                 g.rect_outline(x0 - 0.32, y0 - 0.32, x1 + 0.32, y1 + 0.32, (2.2 * px).max(0.05), [1.0, 0.92, 0.55, 0.95]);
-            }
-            if !b.done() {
-                g.rect(x0, y1 + 0.1, x1, y1 + 0.3, [0.0, 0.0, 0.0, 0.75]);
-                g.rect(x0, y1 + 0.1, x0 + 2.0 * b.progress, y1 + 0.3, [0.35, 0.75, 1.0, 1.0]);
-            } else if b.hp < b.kind.max_hp() - 0.5 || sel {
-                let f = (b.hp / b.kind.max_hp()).clamp(0.0, 1.0);
-                g.rect(x0, y0 - 0.45, x1, y0 - 0.25, [0.0, 0.0, 0.0, 0.75]);
-                g.rect(x0, y0 - 0.45, x0 + 2.0 * f, y0 - 0.25, [1.0 - f, 0.2 + 0.75 * f, 0.15, 1.0]);
-            }
-            if sel {
                 if let Some(r) = b.rally {
                     g.line((c.x, c.y), (r.x, r.y), 1.5 * px, [1.0, 0.92, 0.55, 0.65]);
                     g.rect(r.x - 0.05, r.y - 0.65, r.x + 0.05, r.y, [0.92, 0.85, 0.65, 1.0]);
@@ -1831,15 +1844,8 @@ impl Game {
             if !u.alive || !inview(u.pos) || (u.nation as usize != pl && fog_at(u.pos) != 2) {
                 continue;
             }
-            let p = u.pos;
             let nc = wd.nations[u.nation as usize].color;
             crate::art::draw_world_unit(g, u, nc, era, &RES_COLORS, px);
-            let mhp = u.max_hp();
-            if u.hp < mhp - 0.5 || u.selected {
-                let f = (u.hp / mhp).clamp(0.0, 1.0);
-                g.rect(p.x - 0.36, p.y - 0.72, p.x + 0.36, p.y - 0.62, [0.0, 0.0, 0.0, 0.75]);
-                g.rect(p.x - 0.35, p.y - 0.71, p.x - 0.35 + 0.70 * f, p.y - 0.63, [1.0 - f, 0.25 + 0.7 * f, 0.15, 1.0]);
-            }
         }
         // 矢
         for s in wd.shots.iter() {
@@ -1889,49 +1895,281 @@ impl Game {
         let z = self.zoom;
         let (w, h) = (self.gfx.width as f32, self.gfx.height as f32);
         let era = self.world.era;
-        // ユニットの兵種エンブレムアイコン（文字「民」「戈」等の代わりにメダルアイコンで描画）
-        if z >= 11.0 && self.screen == Screen::Playing {
-            let mut badges = Vec::new();
-            for u in self.world.units.iter() {
-                if !u.alive || (u.nation as usize != self.world.player && !self.seen(u.pos)) {
-                    continue;
-                }
-                let (sx, sy) = self.world_to_screen(u.pos);
-                if sx < -24.0 || sy < TOP_H - 12.0 || sx > w + 24.0 || sy > h - BOT_H + 12.0 {
-                    continue;
-                }
-                let nc = self.world.nations[u.nation as usize].color;
-                let carry = if u.carry > 0.5 { Some(u.carry_kind) } else { None };
-                badges.push((sx, sy, u.kind, u.power, nc, u.selected, carry));
-            }
-            let r = (z * 0.50).clamp(8.5, 16.5);
-            for (sx, sy, kind, pw, nc, sel, carry) in badges {
-                if sel {
-                    self.gfx.stroke_circle(sx, sy, r + 2.2, 1.8, [0.45, 1.0, 0.45, 0.95]);
-                }
-                self.gfx.stroke_circle(sx, sy, r + 0.6, 1.6, c4(nc, 0.95));
-                if let Some(bmp) = self.art.unit_badge(kind, era) {
-                    self.gfx.draw_bitmap(bmp, sx - r, sy - r, sx + r, sy + r);
-                }
-                // 資源運搬中はミニ資源アイコンを左上に表示
-                if let Some(ck) = carry {
-                    if z >= 13.0 {
-                        let cr = (r * 0.48).clamp(4.0, 6.5);
-                        let cx = sx - r * 0.72;
-                        let cy = sy - r * 0.72;
-                        if let Some(rbmp) = &self.art.res_icons[ck] {
-                            self.gfx.draw_bitmap(rbmp, cx - cr, cy - cr, cx + cr, cy + cr);
+        let fog_on = self.fog_active();
+        let pl = self.world.player;
+
+        enum WorldItem {
+            Mountain { sx: f32, sy: f32, r: f32, flip_x: bool, fogged: bool },
+            Forest { sx: f32, sy: f32, r: f32, flip_x: bool, fogged: bool },
+            Mine { sx: f32, sy: f32, r: f32, fogged: bool },
+            Building {
+                sx: f32,
+                sy: f32,
+                r: f32,
+                kind: BKind,
+                nc: [f32; 3],
+                done: bool,
+                progress: f32,
+                hp_frac: Option<f32>,
+                fogged: bool,
+            },
+            Unit {
+                sx: f32,
+                sy: f32,
+                kind: UnitKind,
+                pw: f32,
+                nc: [f32; 3],
+                carry: Option<usize>,
+                flip_x: bool,
+                hp_frac: Option<f32>,
+            },
+        }
+
+        if z >= 2.2 {
+            let mut items: Vec<(f32, WorldItem)> = Vec::new();
+            let view0 = v2(self.cam.x - w / 2.0 / z - 2.5, self.cam.y - h / 2.0 / z - 2.5);
+            let view1 = v2(self.cam.x + w / 2.0 / z + 2.5, self.cam.y + h / 2.0 / z + 2.5);
+            let x0 = (view0.x.floor() as i32).max(0);
+            let y0 = (view0.y.floor() as i32).max(0);
+            let x1 = (view1.x.ceil() as i32).min(MAP_W as i32 - 1);
+            let y1 = (view1.y.ceil() as i32).min(MAP_H as i32 - 1);
+
+            // 山岳・森林のAI生成スプライト
+            let thin = z < 8.5;
+            for ty in y0..=y1 {
+                for tx in x0..=x1 {
+                    let idx = Map::idx(tx, ty);
+                    let t = self.world.map.terrain[idx];
+                    if !matches!(t, Terrain::Mountain | Terrain::Forest) {
+                        continue;
+                    }
+                    if z < 5.5 {
+                        if ((tx * 3 + ty * 5) & 3) != 0 {
+                            continue;
                         }
+                    } else if thin && ((tx + ty) & 1) != 0 {
+                        continue;
+                    }
+                    let f = if fog_on { self.fog[idx] } else { 2 };
+                    if f == 0 {
+                        continue;
+                    }
+                    let fogged = f == 1;
+                    let h1 = crate::rng::hash2(tx, ty, 31);
+                    let h2 = crate::rng::hash2(tx, ty, 47);
+                    let flip_x = h1 > 0.5;
+                    let ox = (h1 - 0.5) * 0.28;
+                    let oy = (h2 - 0.5) * 0.24;
+                    let wp = v2(tx as f32 + 0.5 + ox, ty as f32 + 0.5 + oy);
+                    let (sx, sy) = self.world_to_screen(wp);
+                    if sx < -64.0 || sy < -64.0 || sx > w + 64.0 || sy > h + 64.0 {
+                        continue;
+                    }
+                    match t {
+                        Terrain::Mountain => {
+                            let mult = if z < 5.5 { 1.65 } else if thin { 1.25 } else { 0.92 + 0.22 * h2 };
+                            let r = (z * mult).clamp(5.5, 44.0);
+                            items.push((sy + r * 0.25, WorldItem::Mountain { sx, sy, r, flip_x, fogged }));
+                        }
+                        Terrain::Forest => {
+                            let mult = if z < 5.5 { 1.45 } else if thin { 1.12 } else { 0.80 + 0.20 * h2 };
+                            let r = (z * mult).clamp(5.0, 38.0);
+                            items.push((sy + r * 0.22, WorldItem::Forest { sx, sy, r, flip_x, fogged }));
+                        }
+                        _ => {}
                     }
                 }
-                // 強化済みユニットは金の星（ランクピップ）を右下に表示
-                if pw > 1.01 && z >= 14.0 {
-                    let stars = ((pw - 1.0) / 0.5).round().clamp(1.0, 6.0) as i32;
-                    for s in 0..stars {
-                        let px = sx + r * 0.65 - s as f32 * 4.2;
-                        let py = sy + r * 0.75;
-                        self.gfx.fill_circle(px, py, 2.6, [0.12, 0.08, 0.04, 0.95]);
-                        self.gfx.fill_circle(px, py, 1.8, [1.0, 0.88, 0.32, 1.0]);
+            }
+
+            // 銅山のAI生成スプライト
+            for m in self.world.map.mines.iter() {
+                if m.amount <= 0.0 {
+                    continue;
+                }
+                let wp = v2(m.x as f32 + 0.5, m.y as f32 + 0.5);
+                if !self.explored(wp) {
+                    continue;
+                }
+                let (sx, sy) = self.world_to_screen(wp);
+                if sx < -64.0 || sy < -64.0 || sx > w + 64.0 || sy > h + 64.0 {
+                    continue;
+                }
+                let fogged = fog_on && !self.seen(wp);
+                let s = 0.78 + 0.24 * (m.amount / 2500.0).clamp(0.2, 1.0);
+                let r = (z * s).clamp(6.5, 38.0);
+                items.push((sy + r * 0.28, WorldItem::Mine { sx, sy, r, fogged }));
+            }
+
+            // 建物（都・邑・兵営・田）のAI生成スプライト
+            for (bi, b) in self.world.blds.iter().enumerate() {
+                if !b.alive {
+                    continue;
+                }
+                let c = b.center();
+                if !self.explored(c) {
+                    continue;
+                }
+                let (sx, sy) = self.world_to_screen(c);
+                if sx < -96.0 || sy < -96.0 || sx > w + 96.0 || sy > h + 96.0 {
+                    continue;
+                }
+                let fogged = fog_on && !self.seen(c);
+                let nc = self.world.nations[b.nation as usize].color;
+                let mult = match b.kind {
+                    BKind::Capital => if z < 5.5 { 2.25 } else { 1.62 },
+                    BKind::Town => if z < 5.5 { 1.75 } else { 1.38 },
+                    BKind::Barracks => 1.25,
+                    BKind::Farm => 1.16,
+                };
+                let r = (z * mult).clamp(9.0, 68.0);
+                let sel = self.sel_b == Some(self.world.bh(bi));
+                let hp_frac = if b.done() && (b.hp < b.kind.max_hp() - 0.5 || sel) {
+                    Some((b.hp / b.kind.max_hp()).clamp(0.0, 1.0))
+                } else {
+                    None
+                };
+                let sort_y = if b.kind == BKind::Farm { sy - r * 0.2 } else { sy + r * 0.45 };
+                items.push((
+                    sort_y,
+                    WorldItem::Building {
+                        sx,
+                        sy,
+                        r,
+                        kind: b.kind,
+                        nc,
+                        done: b.done(),
+                        progress: b.progress,
+                        hp_frac,
+                        fogged,
+                    },
+                ));
+            }
+
+            // ユニットの高精細AI生成スプライト（マップや建物に対して適切なサイズに縮小）
+            if z >= 6.5 && self.screen == Screen::Playing {
+                for u in self.world.units.iter() {
+                    if !u.alive || (u.nation as usize != pl && !self.seen(u.pos)) {
+                        continue;
+                    }
+                    let (sx, sy) = self.world_to_screen(u.pos);
+                    if sx < -48.0 || sy < -48.0 || sx > w + 48.0 || sy > h + 48.0 {
+                        continue;
+                    }
+                    let nc = self.world.nations[u.nation as usize].color;
+                    let carry = if u.carry > 0.5 { Some(u.carry_kind) } else { None };
+                    let flip_x = u.dir.x < -0.05;
+                    let mhp = u.max_hp();
+                    let hp_frac = if u.hp < mhp - 0.5 || u.selected {
+                        Some((u.hp / mhp).clamp(0.0, 1.0))
+                    } else {
+                        None
+                    };
+                    items.push((
+                        sy + 2.0,
+                        WorldItem::Unit {
+                            sx,
+                            sy,
+                            kind: u.kind,
+                            pw: u.power,
+                            nc,
+                            carry,
+                            flip_x,
+                            hp_frac,
+                        },
+                    ));
+                }
+            }
+
+            items.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+
+            for (_, item) in items {
+                match item {
+                    WorldItem::Mountain { sx, sy, r, flip_x, fogged } => {
+                        if let Some(bmp) = self.art.mountain_sprite(flip_x, fogged) {
+                            self.gfx.draw_bitmap(bmp, sx - r, sy - r * 1.18, sx + r, sy + r * 0.82);
+                        }
+                    }
+                    WorldItem::Forest { sx, sy, r, flip_x, fogged } => {
+                        if let Some(bmp) = self.art.forest_sprite(flip_x, fogged) {
+                            self.gfx.draw_bitmap(bmp, sx - r, sy - r * 1.12, sx + r, sy + r * 0.88);
+                        }
+                    }
+                    WorldItem::Mine { sx, sy, r, fogged } => {
+                        if let Some(bmp) = self.art.mine_sprite(fogged) {
+                            self.gfx.draw_bitmap(bmp, sx - r, sy - r * 1.05, sx + r, sy + r * 0.95);
+                        }
+                    }
+                    WorldItem::Building { sx, sy, r, kind, nc, done, progress, hp_frac, fogged } => {
+                        let alpha = if done { 1.0 } else { 0.65 };
+                        if let Some(bmp) = self.art.bld_sprite(kind, fogged) {
+                            self.gfx.draw_bitmap_alpha(bmp, sx - r, sy - r * 1.08, sx + r, sy + r * 0.92, alpha);
+                        }
+                        // 建物右下の国色紋章バッジ（どの国の城邑・兵営か一目で判別可能に）
+                        if kind != BKind::Farm && z >= 7.0 {
+                            let br = (r * 0.16).clamp(3.2, 6.5);
+                            let bx = sx + r * 0.56;
+                            let by = sy + r * 0.48;
+                            let k = if fogged { 0.55 } else { 1.0 };
+                            self.gfx.fill_circle(bx, by, br + 1.2, [0.06, 0.05, 0.04, 0.92]);
+                            self.gfx.fill_circle(bx, by, br, [nc[0] * k, nc[1] * k, nc[2] * k, 1.0]);
+                            self.gfx.stroke_circle(bx, by, br + 0.5, 1.1, [0.95 * k, 0.82 * k, 0.38 * k, 0.95]);
+                        }
+                        if !done {
+                            let bw = (r * 1.4).max(16.0);
+                            let by = sy + r * 0.72;
+                            self.gfx.fill_round(sx - bw * 0.5, by, sx + bw * 0.5, by + 3.5, 1.5, [0.08, 0.06, 0.04, 0.68]);
+                            if progress > 0.01 {
+                                self.gfx.fill_round(sx - bw * 0.5, by, sx - bw * 0.5 + bw * progress, by + 3.5, 1.5, [0.35, 0.78, 1.0, 0.95]);
+                            }
+                            self.gfx.stroke_round(sx - bw * 0.5, by, sx + bw * 0.5, by + 3.5, 1.5, 0.8, [0.78, 0.64, 0.34, 0.75]);
+                        } else if let Some(f) = hp_frac {
+                            let bw = (r * 1.4).max(16.0);
+                            let by = sy - r * 1.02;
+                            self.gfx.fill_round(sx - bw * 0.5, by, sx + bw * 0.5, by + 3.5, 1.5, [0.08, 0.06, 0.04, 0.75]);
+                            self.gfx.fill_round(sx - bw * 0.5, by, sx - bw * 0.5 + bw * f, by + 3.5, 1.5, [1.0 - f, 0.22 + 0.75 * f, 0.15, 0.95]);
+                        }
+                    }
+                    WorldItem::Unit { sx, sy, kind, pw, nc, carry, flip_x, hp_frac } => {
+                        let scale = if kind == UnitKind::Chariot { 0.76 } else { 0.62 };
+                        let r = (z * scale * (1.0 + 0.04 * (pw - 1.0).min(4.0))).clamp(7.5, 22.0);
+                        if let Some(bmp) = self.art.unit_sprite(kind, era, flip_x) {
+                            self.gfx.draw_bitmap(bmp, sx - r, sy - r * 1.35, sx + r, sy + r * 0.65);
+                        }
+                        // 足元右下の国色小紋章
+                        let pr = (r * 0.19).clamp(2.2, 3.8);
+                        let px0 = sx + r * 0.42;
+                        let py0 = sy + r * 0.32;
+                        self.gfx.fill_circle(px0, py0, pr + 0.9, [0.08, 0.06, 0.04, 0.92]);
+                        self.gfx.fill_circle(px0, py0, pr, c4(nc, 1.0));
+                        self.gfx.stroke_circle(px0, py0, pr + 0.4, 0.8, [0.95, 0.82, 0.42, 0.9]);
+                        // 資源運搬中はミニ資源アイコンを左上に表示
+                        if let Some(ck) = carry {
+                            if z >= 11.0 {
+                                let cr = (r * 0.38).clamp(3.8, 6.2);
+                                let cx = sx - r * 0.55;
+                                let cy = sy - r * 0.65;
+                                self.gfx.fill_circle(cx, cy, cr + 0.8, [0.08, 0.06, 0.04, 0.85]);
+                                if let Some(rbmp) = &self.art.res_icons[ck] {
+                                    self.gfx.draw_bitmap(rbmp, cx - cr, cy - cr, cx + cr, cy + cr);
+                                }
+                            }
+                        }
+                        // 強化済みユニットは金の星（ランクピップ）を右下に表示
+                        if pw > 1.01 && z >= 12.0 {
+                            let stars = ((pw - 1.0) / 0.5).round().clamp(1.0, 6.0) as i32;
+                            for s in 0..stars {
+                                let px = sx + r * 0.44 - s as f32 * 3.8;
+                                let py = sy + r * 0.48;
+                                self.gfx.fill_circle(px, py, 2.3, [0.12, 0.08, 0.04, 0.95]);
+                                self.gfx.fill_circle(px, py, 1.5, [1.0, 0.88, 0.32, 1.0]);
+                            }
+                        }
+                        if let Some(f) = hp_frac {
+                            let bw = (r * 1.4).max(11.0);
+                            let by = sy - r * 1.40;
+                            self.gfx.fill_rect(sx - bw * 0.5, by, sx + bw * 0.5, by + 2.8, [0.0, 0.0, 0.0, 0.8]);
+                            self.gfx.fill_rect(sx - bw * 0.5, by, sx - bw * 0.5 + bw * f, by + 2.8, [1.0 - f, 0.25 + 0.7 * f, 0.15, 1.0]);
+                        }
                     }
                 }
             }
@@ -1956,7 +2194,7 @@ impl Game {
         }
         for (sx, sy, name, cap, c) in labels {
             let f = if cap && z >= 9.0 { Font::BigCenter } else { Font::NormalCenter };
-            let off = if z >= 9.0 { 1.45 * z + 15.0 } else { 0.0 };
+            let off = if z >= 9.0 { 1.58 * z + 14.0 } else { 1.25 * z + 6.0 };
             let ty = sy - off - 14.0;
             if z >= 8.0 {
                 let bw = if cap { 64.0 } else { 72.0 };
@@ -2422,13 +2660,15 @@ impl Game {
             let u = self.world.unit(self.sel[0]).unwrap();
             let n = &self.world.nations[u.nation as usize];
             let nc = n.color;
-            // Age of Empires 風の大型ユニット肖像アイコン＋体力バー
+            // Age of Empires 風の大型全身ユニット肖像カード＋体力バー
             let px0 = x + 2.0;
-            let py0 = y + 4.0;
-            let psz = 68.0;
-            self.gfx.fill_rect(px0 - 2.0, py0 - 2.0, px0 + psz + 2.0, py0 + psz + 2.0, c4(nc, 0.9));
-            if let Some(bmp) = self.art.unit_icon(u.kind, era) {
-                self.gfx.draw_bitmap(bmp, px0, py0, px0 + psz, py0 + psz);
+            let py0 = y + 2.0;
+            let psz = 88.0;
+            self.art.draw_inset_box(&self.gfx, px0 - 2.0, py0 - 2.0, px0 + psz + 2.0, py0 + psz + 2.0);
+            self.gfx.fill_circle(px0 + psz * 0.5, py0 + psz * 0.74, psz * 0.34, c4(nc, 0.42));
+            self.gfx.stroke_circle(px0 + psz * 0.5, py0 + psz * 0.74, psz * 0.34, 1.5, c4(nc, 0.9));
+            if let Some(bmp) = self.art.unit_sprite(u.kind, era, false) {
+                self.gfx.draw_bitmap(bmp, px0 + 2.0, py0 + 2.0, px0 + psz - 2.0, py0 + psz - 2.0);
             }
             // 肖像下のHPバー
             let f = (u.hp / u.max_hp()).clamp(0.0, 1.0);
@@ -2436,8 +2676,8 @@ impl Game {
             self.gfx.fill_rect(px0 + 1.0, py0 + psz + 5.0, px0 + 1.0 + (psz - 2.0) * f, py0 + psz + 10.0, [1.0 - f, 0.25 + 0.7 * f, 0.15, 1.0]);
             self.gfx.stroke_rect(px0, py0 + psz + 4.0, px0 + psz, py0 + psz + 11.0, 1.0, [0.75, 0.62, 0.34, 0.9]);
 
-            let tx = x + 84.0;
-            let tw = (wd - 84.0).max(100.0);
+            let tx = x + 102.0;
+            let tw = (wd - 102.0).max(100.0);
             let title = format!("{}　【{}】", u.kind.name(era), n.name);
             let lines = format!(
                 "兵力 {:.0}/{:.0}　　能力 {:.1}（時代上限 {:.1}）\n状態：{}{}",
@@ -2454,9 +2694,9 @@ impl Game {
                 UnitKind::Archer => "遠距離から射撃する。歩兵に強いが戦車・騎兵に弱い。",
                 UnitKind::Chariot => "高速の突撃兵。弩兵と民に強いが、戈兵に弱い。",
             };
-            self.gfx.text_shadow(&title, tx, y, tw, 28.0, Font::Big, tc);
-            self.gfx.text(&lines, tx, y + 32.0, tw, 52.0, Font::Normal, tc);
-            self.gfx.text(desc, x + 2.0, y + 98.0, wd, 46.0, Font::Small, [0.80, 0.76, 0.68, 1.0]);
+            self.gfx.text_shadow(&title, tx, y + 2.0, tw, 28.0, Font::Big, tc);
+            self.gfx.text(&lines, tx, y + 34.0, tw, 52.0, Font::Normal, tc);
+            self.gfx.text(desc, x + 2.0, y + 106.0, wd, 38.0, Font::Small, [0.80, 0.76, 0.68, 1.0]);
         } else if self.sel.len() > 1 {
             let mut cnt = [0usize; 4];
             let mut pw = 0.0;

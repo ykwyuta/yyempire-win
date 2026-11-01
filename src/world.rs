@@ -798,6 +798,7 @@ impl World {
 
     pub fn spawn_point(&self, h: Handle) -> Option<V2> {
         let b = self.bld(h)?;
+        let mut fallback = None;
         for r in 1..6 {
             let mut cands = Vec::new();
             for dy in -r..=1 + r {
@@ -812,11 +813,22 @@ impl World {
                 }
             }
             if !cands.is_empty() {
-                let k = (self.time * 7.3) as usize % cands.len();
-                return Some(cands[k]);
+                let free: Vec<V2> = cands
+                    .iter()
+                    .copied()
+                    .filter(|&p| !self.units.iter().any(|u| u.alive && u.pos.dist(p) < 0.85))
+                    .collect();
+                if !free.is_empty() {
+                    let k = (self.units.len().wrapping_mul(3) + (self.time * 7.3) as usize) % free.len();
+                    return Some(free[k]);
+                }
+                if fallback.is_none() {
+                    let k = (self.units.len() + (self.time * 7.3) as usize) % cands.len();
+                    fallback = Some(cands[k]);
+                }
             }
         }
-        None
+        fallback
     }
 
     pub fn passable_at(&self, p: V2) -> bool {
@@ -1243,7 +1255,7 @@ impl World {
         best.map(|b| b.1)
     }
 
-    pub fn nearest_forest(&self, p: V2, maxr: i32) -> Option<(i32, i32)> {
+    pub fn nearest_forest_for(&self, nation: Option<usize>, p: V2, maxr: i32) -> Option<(i32, i32)> {
         let (cx, cy) = p.tile();
         let mut best: Option<(i32, (i32, i32))> = None;
         for r in 0..=maxr {
@@ -1253,10 +1265,19 @@ impl World {
                         continue;
                     }
                     let (x, y) = (cx + dx, cy + dy);
-                    if Map::inb(x, y) && self.map.terrain[Map::idx(x, y)] == Terrain::Forest {
-                        let d = dx * dx + dy * dy;
-                        if best.map_or(true, |b| d < b.0) {
-                            best = Some((d, (x, y)));
+                    if Map::inb(x, y) {
+                        let idx = Map::idx(x, y);
+                        if self.map.terrain[idx] == Terrain::Forest {
+                            if let Some(n) = nation {
+                                let o = self.owner[idx];
+                                if o != NONE && o as usize != n {
+                                    continue;
+                                }
+                            }
+                            let d = dx * dx + dy * dy;
+                            if best.map_or(true, |b| d < b.0) {
+                                best = Some((d, (x, y)));
+                            }
                         }
                     }
                 }
@@ -1268,11 +1289,23 @@ impl World {
         None
     }
 
-    pub fn nearest_mine(&self, p: V2, maxd: f32) -> Option<usize> {
+    pub fn nearest_forest(&self, p: V2, maxr: i32) -> Option<(i32, i32)> {
+        self.nearest_forest_for(None, p, maxr)
+    }
+
+    pub fn nearest_mine_for(&self, nation: Option<usize>, p: V2, maxd: f32) -> Option<usize> {
         let mut best: Option<(f32, usize)> = None;
         for (i, m) in self.map.mines.iter().enumerate() {
             if m.amount <= 0.0 {
                 continue;
+            }
+            if let Some(n) = nation {
+                if Map::inb(m.x, m.y) {
+                    let o = self.owner[Map::idx(m.x, m.y)];
+                    if o != NONE && o as usize != n {
+                        continue;
+                    }
+                }
             }
             let d = v2(m.x as f32 + 0.5, m.y as f32 + 0.5).dist(p);
             if d <= maxd && best.map_or(true, |b| d < b.0) {
@@ -1280,6 +1313,10 @@ impl World {
             }
         }
         best.map(|b| b.1)
+    }
+
+    pub fn nearest_mine(&self, p: V2, maxd: f32) -> Option<usize> {
+        self.nearest_mine_for(None, p, maxd)
     }
 
     pub fn target_info(&self, t: Target) -> Option<(V2, f32, usize)> {
@@ -1573,12 +1610,12 @@ impl World {
         }
         let res = self.nations[ni].res;
         if res[2] < res[1] * 0.6 {
-            if let Some(m) = self.nearest_mine(p, 16.0) {
+            if let Some(m) = self.nearest_mine_for(Some(ni), p, 16.0) {
                 self.order_gather(&[h], Src::Mine(m));
                 return;
             }
         }
-        if let Some((x, y)) = self.nearest_forest(p, 14) {
+        if let Some((x, y)) = self.nearest_forest_for(Some(ni), p, 14) {
             self.order_gather(&[h], Src::Forest(x, y));
         }
     }
@@ -2032,9 +2069,9 @@ impl World {
                                 }
                                 let d = ua.pos - ub.pos;
                                 let l = d.len();
-                                if l < 0.7 {
+                                if l < 0.55 {
                                     let dir = if l > 1e-4 { d * (1.0 / l) } else { v2(((a * 7) % 5) as f32 - 2.0, ((a * 3) % 5) as f32 - 2.0).norm() };
-                                    push = push + dir * (0.7 - l);
+                                    push = push + dir * (0.55 - l);
                                 }
                             }
                         }

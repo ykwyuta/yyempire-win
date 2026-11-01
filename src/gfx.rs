@@ -737,9 +737,13 @@ impl Gfx {
     }
 
     pub fn draw_bitmap(&self, bmp: &ID2D1Bitmap, x0: f32, y0: f32, x1: f32, y1: f32) {
+        self.draw_bitmap_alpha(bmp, x0, y0, x1, y1, 1.0);
+    }
+
+    pub fn draw_bitmap_alpha(&self, bmp: &ID2D1Bitmap, x0: f32, y0: f32, x1: f32, y1: f32, alpha: f32) {
         let Some(rt) = &self.d2d else { return };
         unsafe {
-            rt.DrawBitmap(bmp, Some(&D2D_RECT_F { left: x0, top: y0, right: x1, bottom: y1 }), 1.0, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, None);
+            rt.DrawBitmap(bmp, Some(&D2D_RECT_F { left: x0, top: y0, right: x1, bottom: y1 }), alpha, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, None);
         }
     }
 

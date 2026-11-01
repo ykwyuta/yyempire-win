@@ -41,6 +41,30 @@ pub enum CmdIcon {
     AllArmy = 20,
 }
 
+const UNIT_SPRITE_SZ: usize = 160;
+const RAW_UNIT_SPRITES: [&[u8]; 5] = [
+    include_bytes!("../assets/units/worker.bgra"),
+    include_bytes!("../assets/units/infantry.bgra"),
+    include_bytes!("../assets/units/archer.bgra"),
+    include_bytes!("../assets/units/chariot.bgra"),
+    include_bytes!("../assets/units/cavalry.bgra"),
+];
+
+const BLD_SPRITE_SZ: usize = 192;
+const RAW_BLD_SPRITES: [&[u8]; 4] = [
+    include_bytes!("../assets/map/capital.bgra"),
+    include_bytes!("../assets/map/town.bgra"),
+    include_bytes!("../assets/map/barracks.bgra"),
+    include_bytes!("../assets/map/farm.bgra"),
+];
+
+const PROP_SPRITE_SZ: usize = 160;
+const RAW_PROP_SPRITES: [&[u8]; 3] = [
+    include_bytes!("../assets/map/mountain.bgra"),
+    include_bytes!("../assets/map/forest.bgra"),
+    include_bytes!("../assets/map/mine.bgra"),
+];
+
 pub struct Art {
     gen: u32,
     pub hud_stone: Option<ID2D1Bitmap>,
@@ -52,6 +76,14 @@ pub struct Art {
     pub res_icons: [Option<ID2D1Bitmap>; 7],
     pub cmd_icons: [Option<ID2D1Bitmap>; 21],
     pub unit_badges: [Option<ID2D1Bitmap>; 5],
+    pub unit_sprites: [Option<ID2D1Bitmap>; 5],
+    pub unit_sprites_flip: [Option<ID2D1Bitmap>; 5],
+    pub bld_sprites: [Option<ID2D1Bitmap>; 4],
+    pub bld_sprites_fog: [Option<ID2D1Bitmap>; 4],
+    pub prop_sprites: [Option<ID2D1Bitmap>; 3],
+    pub prop_sprites_flip: [Option<ID2D1Bitmap>; 3],
+    pub prop_sprites_fog: [Option<ID2D1Bitmap>; 3],
+    pub prop_sprites_fog_flip: [Option<ID2D1Bitmap>; 3],
 }
 
 struct Canvas {
@@ -226,6 +258,127 @@ impl Canvas {
             })
             .collect()
     }
+
+    fn blit_raw_sprite(
+        &mut self,
+        raw: &[u8],
+        sz: usize,
+        dst: (f32, f32, f32, f32),
+        src_uv: (f32, f32, f32, f32),
+        circle_clip: Option<(f32, f32, f32)>,
+    ) {
+        let sw = sz as f32;
+        let sh = sz as f32;
+        let (dx0, dy0, dx1, dy1) = dst;
+        let (u0, v0, u1, v1) = src_uv;
+        let ix0 = dx0.floor().max(0.0) as i32;
+        let iy0 = dy0.floor().max(0.0) as i32;
+        let ix1 = dx1.ceil().min(self.w as f32 - 1.0) as i32;
+        let iy1 = dy1.ceil().min(self.h as f32 - 1.0) as i32;
+        let dw = (dx1 - dx0).max(1.0);
+        let dh = (dy1 - dy0).max(1.0);
+
+        let sample_px = |sx: i32, sy: i32| -> [f32; 4] {
+            let cx = sx.clamp(0, sz as i32 - 1) as usize;
+            let cy = sy.clamp(0, sz as i32 - 1) as usize;
+            let off = (cy * sz + cx) * 4;
+            let b = raw[off] as f32 / 255.0;
+            let g = raw[off + 1] as f32 / 255.0;
+            let r = raw[off + 2] as f32 / 255.0;
+            let a = raw[off + 3] as f32 / 255.0;
+            if a > 1e-4 {
+                [(r / a).clamp(0.0, 1.0), (g / a).clamp(0.0, 1.0), (b / a).clamp(0.0, 1.0), a]
+            } else {
+                [0.0; 4]
+            }
+        };
+
+        for y in iy0..=iy1 {
+            for x in ix0..=ix1 {
+                let mut clip_a = 1.0;
+                if let Some((ccx, ccy, cr)) = circle_clip {
+                    let d = ((x as f32 + 0.5 - ccx).powi(2) + (y as f32 + 0.5 - ccy).powi(2)).sqrt();
+                    clip_a = (cr + 0.5 - d).clamp(0.0, 1.0);
+                    if clip_a <= 0.0 {
+                        continue;
+                    }
+                }
+                let tx = (x as f32 + 0.5 - dx0) / dw;
+                let ty = (y as f32 + 0.5 - dy0) / dh;
+                let su = (u0 + (u1 - u0) * tx) * sw - 0.5;
+                let sv = (v0 + (v1 - v0) * ty) * sh - 0.5;
+                let sx0 = su.floor() as i32;
+                let sy0 = sv.floor() as i32;
+                let fx = su - sx0 as f32;
+                let fy = sv - sy0 as f32;
+                let c00 = sample_px(sx0, sy0);
+                let c10 = sample_px(sx0 + 1, sy0);
+                let c01 = sample_px(sx0, sy0 + 1);
+                let c11 = sample_px(sx0 + 1, sy0 + 1);
+                let mut c = [0.0f32; 4];
+                let w00 = (1.0 - fx) * (1.0 - fy);
+                let w10 = fx * (1.0 - fy);
+                let w01 = (1.0 - fx) * fy;
+                let w11 = fx * fy;
+                let a = c00[3] * w00 + c10[3] * w10 + c01[3] * w01 + c11[3] * w11;
+                if a > 1e-3 {
+                    for k in 0..3 {
+                        c[k] = (c00[k] * c00[3] * w00 + c10[k] * c10[3] * w10 + c01[k] * c01[3] * w01 + c11[k] * c11[3] * w11) / a;
+                    }
+                    c[3] = a * clip_a;
+                    self.blend(x, y, c);
+                }
+            }
+        }
+    }
+
+    fn blit_unit_sprite(
+        &mut self,
+        unit_idx: usize,
+        dst: (f32, f32, f32, f32),
+        src_uv: (f32, f32, f32, f32),
+        circle_clip: Option<(f32, f32, f32)>,
+    ) {
+        self.blit_raw_sprite(RAW_UNIT_SPRITES[unit_idx.min(4)], UNIT_SPRITE_SZ, dst, src_uv, circle_clip);
+    }
+
+    fn blit_bld_sprite(
+        &mut self,
+        bld_idx: usize,
+        dst: (f32, f32, f32, f32),
+        src_uv: (f32, f32, f32, f32),
+    ) {
+        self.blit_raw_sprite(RAW_BLD_SPRITES[bld_idx.min(3)], BLD_SPRITE_SZ, dst, src_uv, None);
+    }
+
+    fn blit_prop_sprite(
+        &mut self,
+        prop_idx: usize,
+        dst: (f32, f32, f32, f32),
+        src_uv: (f32, f32, f32, f32),
+    ) {
+        self.blit_raw_sprite(RAW_PROP_SPRITES[prop_idx.min(2)], PROP_SPRITE_SZ, dst, src_uv, None);
+    }
+}
+
+fn load_raw_sprite_bgra(raw: &[u8], sz: usize, flip_x: bool, mul: f32) -> Vec<u32> {
+    let mut out = vec![0u32; sz * sz];
+    for y in 0..sz {
+        for x in 0..sz {
+            let sx = if flip_x { sz - 1 - x } else { x };
+            let off = (y * sz + sx) * 4;
+            let b = ((raw[off] as f32 * mul).round() as u32).min(255);
+            let g = ((raw[off + 1] as f32 * mul).round() as u32).min(255);
+            let r = ((raw[off + 2] as f32 * mul).round() as u32).min(255);
+            let a = raw[off + 3] as u32;
+            out[y * sz + x] = b | (g << 8) | (r << 16) | (a << 24);
+        }
+    }
+    out
+}
+
+fn load_unit_sprite_bgra(idx: usize, flip_x: bool) -> Vec<u32> {
+    load_raw_sprite_bgra(RAW_UNIT_SPRITES[idx.min(4)], UNIT_SPRITE_SZ, flip_x, 1.0)
 }
 
 fn lerp(a: f32, b: f32, t: f32) -> f32 {
@@ -513,24 +666,12 @@ fn gen_res_icon(kind: ResIcon) -> Vec<u32> {
             cv.poly(&[(16.0, 19.0), (19.0, 12.5), (22.5, 18.5)], [0.25, 0.72, 0.55, 1.0]);
         }
         ResIcon::Worker => {
-            // 民の編み笠と鍬
-            cv.capsule(13.0, 36.0, 35.0, 14.0, 2.2, [0.58, 0.38, 0.20, 1.0]);
-            cv.poly(&[(31.0, 11.0), (39.0, 17.0), (34.0, 22.0), (28.0, 15.0)], [0.78, 0.80, 0.84, 1.0]);
-            // 菅笠（すげがさ）
-            cv.poly(&[(9.0, 29.0), (24.0, 14.0), (39.0, 29.0)], [0.88, 0.74, 0.42, 1.0]);
-            cv.capsule(9.0, 29.0, 39.0, 29.0, 2.0, [0.72, 0.58, 0.30, 1.0]);
-            cv.circle(24.0, 32.0, 5.5, [0.92, 0.76, 0.60, 1.0]);
+            cv.blit_unit_sprite(0, (4.0, 4.0, 44.0, 44.0), (0.16, 0.0, 0.84, 0.68), Some((24.0, 24.0, 18.5)));
+            cv.ring(24.0, 24.0, 19.5, 2.0, [0.95, 0.80, 0.38, 1.0]);
         }
         ResIcon::Soldier => {
-            // 交差する戈と青銅兜
-            cv.capsule(11.0, 37.0, 37.0, 11.0, 2.0, [0.55, 0.34, 0.18, 1.0]);
-            cv.capsule(37.0, 37.0, 11.0, 11.0, 2.0, [0.55, 0.34, 0.18, 1.0]);
-            // 赤い兜飾り（纓）
-            cv.poly(&[(24.0, 7.0), (18.0, 15.0), (30.0, 15.0)], [0.90, 0.20, 0.18, 1.0]);
-            // 青銅兜
-            cv.circle(24.0, 24.0, 9.5, [0.85, 0.68, 0.34, 1.0]);
-            cv.poly(&[(14.0, 24.0), (34.0, 24.0), (36.0, 34.0), (12.0, 34.0)], [0.72, 0.55, 0.26, 1.0]);
-            cv.capsule(14.0, 24.0, 34.0, 24.0, 1.8, [1.0, 0.90, 0.58, 1.0]);
+            cv.blit_unit_sprite(1, (4.0, 4.0, 44.0, 44.0), (0.14, 0.0, 0.86, 0.72), Some((24.0, 24.0, 18.5)));
+            cv.ring(24.0, 24.0, 19.5, 2.0, [0.95, 0.80, 0.38, 1.0]);
         }
         ResIcon::Upkeep => {
             // 兵糧袋と炎
@@ -558,140 +699,40 @@ fn gen_cmd_icon(kind: CmdIcon) -> Vec<u32> {
     let mut cv = Canvas::new(64, 64);
     match kind {
         CmdIcon::Worker => {
-            icon_backdrop(&mut cv, [0.22, 0.38, 0.52], [0.18, 0.26, 0.14], [0.55, 0.62, 0.42]);
-            // 肩と麻衣
-            cv.poly(&[(12.0, 60.0), (52.0, 60.0), (46.0, 38.0), (18.0, 38.0)], [0.36, 0.48, 0.62, 1.0]);
-            cv.poly(&[(22.0, 60.0), (32.0, 44.0), (42.0, 60.0)], [0.78, 0.72, 0.58, 1.0]);
-            // 肩に担いだ鍬（くわ）
-            cv.capsule(12.0, 46.0, 52.0, 16.0, 2.5, [0.55, 0.36, 0.18, 1.0]);
-            cv.poly(&[(46.0, 12.0), (57.0, 20.0), (51.0, 26.0), (42.0, 17.0)], [0.82, 0.85, 0.88, 1.0]);
-            // 顔と鉢巻・菅笠
-            cv.circle(31.0, 29.0, 9.5, [0.90, 0.72, 0.55, 1.0]);
-            cv.poly(&[(11.0, 24.0), (31.0, 9.0), (51.0, 24.0)], [0.88, 0.74, 0.40, 1.0]);
-            cv.capsule(11.0, 24.0, 51.0, 24.0, 2.2, [0.70, 0.56, 0.28, 1.0]);
+            icon_backdrop(&mut cv, [0.22, 0.38, 0.52], [0.16, 0.24, 0.14], [0.65, 0.72, 0.48]);
+            cv.blit_unit_sprite(0, (3.0, 3.0, 61.0, 61.0), (0.14, 0.0, 0.86, 0.72), None);
         }
         CmdIcon::Infantry => {
-            icon_backdrop(&mut cv, [0.36, 0.16, 0.12], [0.14, 0.08, 0.06], [0.72, 0.38, 0.20]);
-            // 札甲（ラメラーアーマー）の胴体
-            cv.poly(&[(12.0, 60.0), (50.0, 60.0), (45.0, 36.0), (17.0, 36.0)], [0.68, 0.18, 0.15, 1.0]);
-            for r in 0..3 {
-                let y = 41.0 + r as f32 * 6.0;
-                cv.capsule(18.0, y, 44.0, y, 1.8, [0.82, 0.66, 0.32, 1.0]);
-            }
-            // 青銅兜と赤い飾り毛
-            cv.poly(&[(28.0, 6.0), (22.0, 16.0), (34.0, 16.0)], [0.92, 0.20, 0.16, 1.0]);
-            cv.circle(29.0, 27.0, 9.0, [0.88, 0.70, 0.54, 1.0]);
-            cv.poly(&[(18.0, 25.0), (29.0, 13.0), (40.0, 25.0)], [0.86, 0.70, 0.34, 1.0]);
-            cv.capsule(18.0, 25.0, 40.0, 25.0, 2.0, [1.0, 0.88, 0.52, 1.0]);
-            // 右手の青銅戈（か）
-            cv.capsule(48.0, 58.0, 48.0, 8.0, 2.4, [0.52, 0.32, 0.16, 1.0]);
-            cv.poly(&[(48.0, 14.0), (32.0, 19.0), (48.0, 23.0)], [0.98, 0.88, 0.55, 1.0]);
-            cv.poly(&[(48.0, 12.0), (56.0, 17.0), (48.0, 22.0)], [0.82, 0.68, 0.36, 1.0]);
-            // 左手の盾
-            cv.round_rect(8.0, 34.0, 24.0, 58.0, 3.0, [0.22, 0.14, 0.10, 1.0]);
-            cv.round_rect(10.0, 36.0, 22.0, 56.0, 2.0, [0.78, 0.62, 0.30, 1.0]);
+            icon_backdrop(&mut cv, [0.38, 0.16, 0.12], [0.16, 0.08, 0.06], [0.82, 0.45, 0.24]);
+            cv.blit_unit_sprite(1, (3.0, 3.0, 61.0, 61.0), (0.12, 0.0, 0.88, 0.76), None);
         }
         CmdIcon::Archer => {
-            icon_backdrop(&mut cv, [0.14, 0.28, 0.22], [0.08, 0.14, 0.10], [0.35, 0.58, 0.42]);
-            // 射手の上半身
-            cv.poly(&[(10.0, 60.0), (42.0, 60.0), (38.0, 36.0), (14.0, 36.0)], [0.24, 0.46, 0.32, 1.0]);
-            cv.circle(26.0, 25.0, 8.5, [0.90, 0.72, 0.55, 1.0]);
-            cv.poly(&[(16.0, 22.0), (26.0, 12.0), (36.0, 22.0)], [0.35, 0.26, 0.18, 1.0]);
-            // 構えた大型の弩（クロスボウ）
-            cv.capsule(22.0, 36.0, 56.0, 30.0, 2.8, [0.55, 0.34, 0.16, 1.0]);
-            // 弩の弓幹（アーク）
-            cv.capsule(46.0, 12.0, 54.0, 30.0, 2.4, [0.78, 0.58, 0.28, 1.0]);
-            cv.capsule(54.0, 30.0, 48.0, 48.0, 2.4, [0.78, 0.58, 0.28, 1.0]);
-            // 弦と輝く矢じり
-            cv.capsule(46.0, 12.0, 34.0, 33.0, 1.0, [0.90, 0.88, 0.82, 0.9]);
-            cv.capsule(48.0, 48.0, 34.0, 33.0, 1.0, [0.90, 0.88, 0.82, 0.9]);
-            cv.poly(&[(59.0, 29.0), (50.0, 26.0), (51.0, 34.0)], [1.0, 0.92, 0.60, 1.0]);
+            icon_backdrop(&mut cv, [0.14, 0.30, 0.22], [0.08, 0.14, 0.10], [0.42, 0.68, 0.48]);
+            cv.blit_unit_sprite(2, (3.0, 3.0, 61.0, 61.0), (0.12, 0.0, 0.88, 0.76), None);
         }
         CmdIcon::Chariot => {
-            icon_backdrop(&mut cv, [0.42, 0.28, 0.14], [0.20, 0.12, 0.06], [0.85, 0.62, 0.28]);
-            // 戦旗
-            cv.capsule(16.0, 50.0, 16.0, 10.0, 1.8, [0.55, 0.35, 0.18, 1.0]);
-            cv.poly(&[(16.0, 10.0), (36.0, 15.0), (16.0, 22.0)], [0.88, 0.22, 0.16, 1.0]);
-            // 戦車の輿（車箱）
-            cv.round_rect(12.0, 28.0, 38.0, 48.0, 3.0, [0.68, 0.20, 0.14, 1.0]);
-            cv.round_rect(14.0, 30.0, 36.0, 46.0, 2.0, [0.88, 0.72, 0.34, 1.0]);
-            // 駆ける軍馬の首と頭部
-            cv.poly(&[(34.0, 44.0), (46.0, 18.0), (58.0, 24.0), (48.0, 48.0)], [0.52, 0.30, 0.16, 1.0]);
-            cv.poly(&[(46.0, 18.0), (59.0, 22.0), (56.0, 29.0), (44.0, 25.0)], [0.62, 0.38, 0.20, 1.0]);
-            // 大型のスポーク車輪
-            cv.ring(25.0, 44.0, 12.0, 3.2, [0.85, 0.68, 0.32, 1.0]);
-            for k in 0..6 {
-                let a = k as f32 * std::f32::consts::PI / 3.0;
-                cv.capsule(25.0 - a.cos() * 11.0, 44.0 - a.sin() * 11.0, 25.0 + a.cos() * 11.0, 44.0 + a.sin() * 11.0, 1.1, [0.75, 0.58, 0.28, 1.0]);
-            }
-            cv.circle(25.0, 44.0, 3.5, [1.0, 0.88, 0.50, 1.0]);
+            icon_backdrop(&mut cv, [0.42, 0.28, 0.14], [0.20, 0.12, 0.06], [0.88, 0.66, 0.30]);
+            cv.blit_unit_sprite(3, (3.0, 3.0, 61.0, 61.0), (0.04, 0.08, 0.96, 0.96), None);
         }
         CmdIcon::Cavalry => {
-            icon_backdrop(&mut cv, [0.20, 0.26, 0.42], [0.12, 0.10, 0.16], [0.58, 0.48, 0.68]);
-            // 軍馬の胴と首
-            cv.poly(&[(10.0, 56.0), (46.0, 56.0), (54.0, 22.0), (40.0, 18.0), (28.0, 38.0)], [0.46, 0.26, 0.14, 1.0]);
-            cv.poly(&[(42.0, 16.0), (58.0, 22.0), (54.0, 29.0), (40.0, 24.0)], [0.58, 0.34, 0.18, 1.0]);
-            // 騎兵の鎧と兜
-            cv.round_rect(20.0, 24.0, 34.0, 44.0, 4.0, [0.28, 0.48, 0.78, 1.0]);
-            cv.circle(27.0, 17.0, 6.5, [0.88, 0.72, 0.36, 1.0]);
-            // 突撃する長槍
-            cv.capsule(8.0, 42.0, 58.0, 12.0, 2.0, [0.65, 0.45, 0.22, 1.0]);
-            cv.poly(&[(59.0, 11.0), (50.0, 13.0), (53.0, 19.0)], [1.0, 0.94, 0.72, 1.0]);
+            icon_backdrop(&mut cv, [0.22, 0.24, 0.42], [0.12, 0.10, 0.18], [0.64, 0.52, 0.74]);
+            cv.blit_unit_sprite(4, (3.0, 3.0, 61.0, 61.0), (0.10, 0.0, 0.92, 0.82), None);
         }
         CmdIcon::Farm => {
             icon_backdrop(&mut cv, [0.28, 0.48, 0.68], [0.26, 0.42, 0.18], [0.75, 0.82, 0.52]);
-            // 遠景の丘と空
-            cv.poly(&[(4.0, 28.0), (60.0, 28.0), (60.0, 60.0), (4.0, 60.0)], [0.38, 0.52, 0.22, 1.0]);
-            // 黄金の畝（うね）と水路
-            for k in 0..4 {
-                let y = 31.0 + k as f32 * 7.0;
-                cv.capsule(8.0, y, 56.0, y, 2.6, [0.92, 0.78, 0.28, 1.0]);
-                cv.capsule(8.0, y + 3.4, 56.0, y + 3.4, 1.3, [0.28, 0.58, 0.78, 1.0]);
-            }
-            // 農舎（茅葺き屋根の小屋）
-            cv.round_rect(12.0, 18.0, 28.0, 30.0, 1.5, [0.58, 0.42, 0.24, 1.0]);
-            cv.poly(&[(8.0, 20.0), (20.0, 10.0), (32.0, 20.0)], [0.82, 0.68, 0.34, 1.0]);
+            cv.blit_bld_sprite(3, (3.0, 3.0, 61.0, 61.0), (0.0, 0.0, 1.0, 1.0));
         }
         CmdIcon::Barracks => {
             icon_backdrop(&mut cv, [0.38, 0.18, 0.14], [0.18, 0.12, 0.10], [0.72, 0.42, 0.26]);
-            // 石垣基壇
-            cv.round_rect(8.0, 42.0, 56.0, 56.0, 2.0, [0.48, 0.44, 0.38, 1.0]);
-            // 兵営の本殿（柱と壁）
-            cv.round_rect(13.0, 26.0, 51.0, 43.0, 1.5, [0.68, 0.22, 0.16, 1.0]);
-            for &x in &[18.0, 27.0, 37.0, 46.0] {
-                cv.capsule(x, 26.0, x, 42.0, 1.6, [0.88, 0.70, 0.34, 1.0]);
-            }
-            // 反り屋根（瓦屋根）
-            cv.poly(&[(6.0, 28.0), (32.0, 11.0), (58.0, 28.0)], [0.24, 0.26, 0.30, 1.0]);
-            cv.capsule(6.0, 28.0, 58.0, 28.0, 2.2, [0.92, 0.76, 0.36, 1.0]);
-            // 陣太鼓と武器掛け
-            cv.circle(32.0, 46.0, 6.5, [0.92, 0.82, 0.58, 1.0]);
-            cv.ring(32.0, 46.0, 6.5, 2.0, [0.78, 0.18, 0.14, 1.0]);
+            cv.blit_bld_sprite(2, (3.0, 3.0, 61.0, 61.0), (0.0, 0.0, 1.0, 1.0));
         }
         CmdIcon::Town => {
             icon_backdrop(&mut cv, [0.22, 0.36, 0.52], [0.18, 0.24, 0.16], [0.58, 0.66, 0.52]);
-            // 城壁と女垣（クレネレーション）
-            cv.round_rect(7.0, 34.0, 57.0, 56.0, 2.0, [0.62, 0.56, 0.46, 1.0]);
-            for k in 0..6 {
-                let x = 8.0 + k as f32 * 8.5;
-                cv.round_rect(x, 30.0, x + 5.5, 35.0, 1.0, [0.72, 0.66, 0.54, 1.0]);
-            }
-            // 城門（アーチ）
-            cv.round_rect(26.0, 42.0, 38.0, 56.0, 5.0, [0.18, 0.12, 0.08, 1.0]);
-            // 城楼（二層の櫓）
-            cv.round_rect(18.0, 20.0, 46.0, 32.0, 1.5, [0.72, 0.24, 0.18, 1.0]);
-            cv.poly(&[(12.0, 22.0), (32.0, 9.0), (52.0, 22.0)], [0.26, 0.30, 0.36, 1.0]);
-            cv.capsule(12.0, 22.0, 52.0, 22.0, 2.0, [0.95, 0.80, 0.38, 1.0]);
+            cv.blit_bld_sprite(1, (3.0, 3.0, 61.0, 61.0), (0.0, 0.0, 1.0, 1.0));
         }
         CmdIcon::Capital => {
             icon_backdrop(&mut cv, [0.48, 0.32, 0.14], [0.22, 0.12, 0.08], [0.98, 0.82, 0.38]);
-            // 壮麗な二層宮殿と黄金の鴟尾（しび）
-            cv.round_rect(6.0, 38.0, 58.0, 57.0, 2.0, [0.68, 0.62, 0.50, 1.0]);
-            cv.round_rect(26.0, 44.0, 38.0, 57.0, 5.0, [0.22, 0.12, 0.08, 1.0]);
-            cv.round_rect(14.0, 25.0, 50.0, 39.0, 1.5, [0.82, 0.22, 0.16, 1.0]);
-            cv.poly(&[(8.0, 27.0), (32.0, 16.0), (56.0, 27.0)], [0.92, 0.74, 0.28, 1.0]);
-            cv.round_rect(20.0, 15.0, 44.0, 25.0, 1.5, [0.88, 0.28, 0.18, 1.0]);
-            cv.poly(&[(14.0, 17.0), (32.0, 7.0), (50.0, 17.0)], [0.98, 0.82, 0.35, 1.0]);
+            cv.blit_bld_sprite(0, (3.0, 3.0, 61.0, 61.0), (0.0, 0.0, 1.0, 1.0));
         }
         CmdIcon::Upgrade => {
             icon_backdrop(&mut cv, [0.16, 0.28, 0.48], [0.08, 0.12, 0.24], [0.45, 0.68, 0.95]);
@@ -770,25 +811,17 @@ fn gen_cmd_icon(kind: CmdIcon) -> Vec<u32> {
         }
         CmdIcon::GatherWood => {
             icon_backdrop(&mut cv, [0.16, 0.34, 0.18], [0.08, 0.16, 0.08], [0.38, 0.68, 0.32]);
-            // 森林の樹冠と丸太・伐採斧
-            cv.circle(22.0, 24.0, 11.0, [0.22, 0.52, 0.22, 1.0]);
-            cv.circle(32.0, 20.0, 10.0, [0.34, 0.66, 0.28, 1.0]);
-            cv.round_rect(12.0, 42.0, 48.0, 54.0, 4.0, [0.55, 0.34, 0.16, 1.0]);
-            cv.circle(48.0, 48.0, 6.0, [0.85, 0.68, 0.40, 1.0]);
-            // 輝く斧
-            cv.capsule(16.0, 48.0, 48.0, 14.0, 2.8, [0.68, 0.44, 0.22, 1.0]);
-            cv.poly(&[(40.0, 12.0), (56.0, 22.0), (46.0, 32.0), (36.0, 20.0)], [0.90, 0.94, 0.98, 1.0]);
+            cv.blit_prop_sprite(1, (3.0, 3.0, 61.0, 61.0), (0.0, 0.0, 1.0, 1.0));
+            // 輝く伐採斧のオーバーレイ
+            cv.capsule(16.0, 52.0, 48.0, 18.0, 2.6, [0.68, 0.44, 0.22, 1.0]);
+            cv.poly(&[(40.0, 14.0), (56.0, 24.0), (46.0, 34.0), (36.0, 22.0)], [0.95, 0.96, 1.0, 1.0]);
         }
         CmdIcon::GatherBronze => {
             icon_backdrop(&mut cv, [0.32, 0.22, 0.14], [0.14, 0.10, 0.06], [0.85, 0.56, 0.24]);
-            // 銅山の岩塊と孔雀石・青銅鉱脈
-            cv.poly(&[(10.0, 54.0), (26.0, 24.0), (46.0, 54.0)], [0.52, 0.42, 0.34, 1.0]);
-            cv.poly(&[(26.0, 54.0), (42.0, 28.0), (56.0, 54.0)], [0.40, 0.32, 0.26, 1.0]);
-            cv.circle(26.0, 42.0, 5.5, [0.98, 0.68, 0.24, 1.0]);
-            cv.circle(38.0, 44.0, 5.0, [0.28, 0.88, 0.66, 1.0]);
-            // ツルハシ
-            cv.capsule(14.0, 48.0, 46.0, 16.0, 2.8, [0.65, 0.42, 0.20, 1.0]);
-            cv.capsule(34.0, 10.0, 54.0, 30.0, 3.0, [0.92, 0.85, 0.65, 1.0]);
+            cv.blit_prop_sprite(2, (3.0, 3.0, 61.0, 61.0), (0.0, 0.0, 1.0, 1.0));
+            // ツルハシのオーバーレイ
+            cv.capsule(14.0, 50.0, 46.0, 18.0, 2.6, [0.65, 0.42, 0.20, 1.0]);
+            cv.capsule(34.0, 12.0, 54.0, 32.0, 2.8, [0.98, 0.90, 0.68, 1.0]);
         }
         CmdIcon::Defend => {
             icon_backdrop(&mut cv, [0.16, 0.28, 0.46], [0.08, 0.14, 0.24], [0.42, 0.68, 0.95]);
@@ -833,53 +866,16 @@ fn gen_unit_badge(idx: usize) -> Vec<u32> {
     cv.ring(24.0, 24.0, 19.5, 2.2, [0.92, 0.76, 0.36, 0.98]);
     cv.ring(24.0, 24.0, 17.2, 0.9, [0.45, 0.34, 0.16, 0.85]);
 
-    match idx {
-        0 => {
-            // 民：菅笠（すげがさ）と黄金の鍬（くわ）
-            cv.capsule(13.0, 35.0, 34.0, 14.0, 2.6, [0.68, 0.44, 0.20, 1.0]);
-            cv.poly(&[(28.0, 10.0), (39.0, 19.0), (34.0, 24.0), (24.0, 15.0)], [0.92, 0.95, 0.98, 1.0]);
-            cv.poly(&[(10.0, 27.0), (24.0, 14.0), (38.0, 27.0)], [0.96, 0.82, 0.38, 1.0]);
-            cv.capsule(10.0, 27.0, 38.0, 27.0, 2.0, [0.76, 0.58, 0.24, 1.0]);
-        }
-        1 => {
-            // 戈兵：象徴的な青銅の「戈（か）」と紅纓・盾
-            cv.capsule(26.0, 39.0, 26.0, 9.0, 2.5, [0.68, 0.42, 0.20, 1.0]);
-            // 横に突き出る鋭い戈の穂先（援）と内
-            cv.poly(&[(26.0, 13.0), (9.0, 19.0), (26.0, 23.0)], [1.0, 0.92, 0.55, 1.0]);
-            cv.poly(&[(26.0, 14.0), (38.0, 18.0), (26.0, 22.0)], [0.88, 0.72, 0.34, 1.0]);
-            // 胡（下へ伸びる刃）
-            cv.poly(&[(23.0, 18.0), (26.0, 18.0), (26.0, 29.0), (22.0, 26.0)], [0.95, 0.84, 0.42, 1.0]);
-            // 赤い房飾り
-            cv.circle(29.0, 23.0, 3.2, [0.95, 0.22, 0.16, 1.0]);
-        }
-        2 => {
-            // 弩兵：張られた大型の弩（クロスボウ）と黄金の矢
-            cv.capsule(12.0, 17.0, 24.0, 11.0, 2.4, [0.90, 0.72, 0.34, 1.0]);
-            cv.capsule(24.0, 11.0, 36.0, 17.0, 2.4, [0.90, 0.72, 0.34, 1.0]);
-            // 弦
-            cv.capsule(12.0, 17.0, 24.0, 31.0, 1.2, [0.92, 0.92, 0.88, 0.95]);
-            cv.capsule(36.0, 17.0, 24.0, 31.0, 1.2, [0.92, 0.92, 0.88, 0.95]);
-            // 臂（ストック）と矢
-            cv.capsule(24.0, 38.0, 24.0, 12.0, 2.5, [0.62, 0.38, 0.18, 1.0]);
-            cv.poly(&[(24.0, 7.0), (19.0, 15.0), (29.0, 15.0)], [1.0, 0.94, 0.58, 1.0]);
-        }
-        3 => {
-            // 戦車：青銅のスポーク車輪と紅の軍旗
-            cv.ring(24.0, 24.0, 11.5, 3.0, [0.98, 0.82, 0.38, 1.0]);
-            for k in 0..8 {
-                let a = k as f32 * std::f32::consts::PI / 4.0;
-                cv.capsule(24.0 - a.cos() * 11.0, 24.0 - a.sin() * 11.0, 24.0 + a.cos() * 11.0, 24.0 + a.sin() * 11.0, 1.2, [0.85, 0.68, 0.30, 1.0]);
-            }
-            cv.circle(24.0, 24.0, 4.0, [1.0, 0.92, 0.58, 1.0]);
-        }
-        _ => {
-            // 騎兵：軍馬の頭と突撃槍
-            cv.poly(&[(14.0, 36.0), (28.0, 36.0), (34.0, 16.0), (24.0, 11.0), (16.0, 22.0)], [0.88, 0.72, 0.42, 1.0]);
-            cv.poly(&[(24.0, 11.0), (37.0, 17.0), (34.0, 23.0), (22.0, 18.0)], [0.98, 0.86, 0.55, 1.0]);
-            cv.capsule(11.0, 35.0, 37.0, 11.0, 2.2, [0.95, 0.95, 1.0, 1.0]);
-            cv.poly(&[(39.0, 9.0), (31.0, 12.0), (35.0, 17.0)], [1.0, 0.92, 0.55, 1.0]);
-        }
-    }
+    let uv = match idx {
+        0 => (0.04, 0.0, 0.96, 0.72),
+        1 => (0.04, 0.0, 0.96, 0.72),
+        2 => (0.04, 0.0, 0.96, 0.72),
+        3 => (0.0, 0.06, 1.0, 0.94),
+        _ => (0.06, 0.0, 0.96, 0.84),
+    };
+    cv.blit_unit_sprite(idx, (4.0, 4.0, 44.0, 44.0), uv, Some((24.0, 24.0, 18.6)));
+    cv.ring(24.0, 24.0, 19.5, 2.2, [0.95, 0.80, 0.38, 0.98]);
+    cv.ring(24.0, 24.0, 17.6, 0.9, [0.45, 0.34, 0.16, 0.85]);
     cv.to_bgra_premul()
 }
 
@@ -896,6 +892,14 @@ impl Art {
             res_icons: Default::default(),
             cmd_icons: Default::default(),
             unit_badges: Default::default(),
+            unit_sprites: Default::default(),
+            unit_sprites_flip: Default::default(),
+            bld_sprites: Default::default(),
+            bld_sprites_fog: Default::default(),
+            prop_sprites: Default::default(),
+            prop_sprites_flip: Default::default(),
+            prop_sprites_fog: Default::default(),
+            prop_sprites_fog_flip: Default::default(),
         }
     }
 
@@ -952,6 +956,81 @@ impl Art {
         }
         for b in 0..5 {
             self.unit_badges[b] = gfx.create_bitmap(48, 48, &gen_unit_badge(b));
+            let sz = UNIT_SPRITE_SZ as u32;
+            self.unit_sprites[b] = gfx.create_bitmap(sz, sz, &load_unit_sprite_bgra(b, false));
+            self.unit_sprites_flip[b] = gfx.create_bitmap(sz, sz, &load_unit_sprite_bgra(b, true));
+        }
+        let bsz = BLD_SPRITE_SZ as u32;
+        for b in 0..4 {
+            self.bld_sprites[b] = gfx.create_bitmap(bsz, bsz, &load_raw_sprite_bgra(RAW_BLD_SPRITES[b], BLD_SPRITE_SZ, false, 1.0));
+            self.bld_sprites_fog[b] = gfx.create_bitmap(bsz, bsz, &load_raw_sprite_bgra(RAW_BLD_SPRITES[b], BLD_SPRITE_SZ, false, 0.52));
+        }
+        let psz = PROP_SPRITE_SZ as u32;
+        for p in 0..3 {
+            self.prop_sprites[p] = gfx.create_bitmap(psz, psz, &load_raw_sprite_bgra(RAW_PROP_SPRITES[p], PROP_SPRITE_SZ, false, 1.0));
+            self.prop_sprites_flip[p] = gfx.create_bitmap(psz, psz, &load_raw_sprite_bgra(RAW_PROP_SPRITES[p], PROP_SPRITE_SZ, true, 1.0));
+            self.prop_sprites_fog[p] = gfx.create_bitmap(psz, psz, &load_raw_sprite_bgra(RAW_PROP_SPRITES[p], PROP_SPRITE_SZ, false, 0.52));
+            self.prop_sprites_fog_flip[p] = gfx.create_bitmap(psz, psz, &load_raw_sprite_bgra(RAW_PROP_SPRITES[p], PROP_SPRITE_SZ, true, 0.52));
+        }
+    }
+
+    pub fn bld_sprite(&self, k: BKind, fogged: bool) -> Option<&ID2D1Bitmap> {
+        let idx = match k {
+            BKind::Capital => 0,
+            BKind::Town => 1,
+            BKind::Barracks => 2,
+            BKind::Farm => 3,
+        };
+        if fogged {
+            self.bld_sprites_fog[idx].as_ref()
+        } else {
+            self.bld_sprites[idx].as_ref()
+        }
+    }
+
+    pub fn mountain_sprite(&self, flip_x: bool, fogged: bool) -> Option<&ID2D1Bitmap> {
+        match (fogged, flip_x) {
+            (false, false) => self.prop_sprites[0].as_ref(),
+            (false, true) => self.prop_sprites_flip[0].as_ref(),
+            (true, false) => self.prop_sprites_fog[0].as_ref(),
+            (true, true) => self.prop_sprites_fog_flip[0].as_ref(),
+        }
+    }
+
+    pub fn forest_sprite(&self, flip_x: bool, fogged: bool) -> Option<&ID2D1Bitmap> {
+        match (fogged, flip_x) {
+            (false, false) => self.prop_sprites[1].as_ref(),
+            (false, true) => self.prop_sprites_flip[1].as_ref(),
+            (true, false) => self.prop_sprites_fog[1].as_ref(),
+            (true, true) => self.prop_sprites_fog_flip[1].as_ref(),
+        }
+    }
+
+    pub fn mine_sprite(&self, fogged: bool) -> Option<&ID2D1Bitmap> {
+        if fogged {
+            self.prop_sprites_fog[2].as_ref()
+        } else {
+            self.prop_sprites[2].as_ref()
+        }
+    }
+
+    pub fn unit_sprite(&self, k: UnitKind, era: Era, flip_x: bool) -> Option<&ID2D1Bitmap> {
+        let idx = match k {
+            UnitKind::Worker => 0,
+            UnitKind::Infantry => 1,
+            UnitKind::Archer => 2,
+            UnitKind::Chariot => {
+                if era == Era::Spring {
+                    3
+                } else {
+                    4
+                }
+            }
+        };
+        if flip_x {
+            self.unit_sprites_flip[idx].as_ref()
+        } else {
+            self.unit_sprites[idx].as_ref()
         }
     }
 
@@ -1072,8 +1151,8 @@ pub fn paint_aoe_terrain_pixel(
     let fy = y as f32 + (py as f32 + 0.5) / scale as f32;
 
     // タイル境界の四角いカクつきを消すための有機的ドメインワープ
-    let wx = fx + (fbm(fx * 1.4, fy * 1.4, 911, 2) - 0.5) * 0.48;
-    let wy = fy + (fbm(fx * 1.4 + 31.0, fy * 1.4 + 17.0, 912, 2) - 0.5) * 0.48;
+    let wx = fx + (fbm(fx * 1.4, fy * 1.4, 911, 2) - 0.5) * 0.52;
+    let wy = fy + (fbm(fx * 1.4 + 31.0, fy * 1.4 + 17.0, 912, 2) - 0.5) * 0.52;
 
     let sample_tile = |tx: i32, ty: i32| -> (Terrain, f32) {
         let cx = tx.clamp(0, MAP_W as i32 - 1);
@@ -1084,38 +1163,46 @@ pub fn paint_aoe_terrain_pixel(
 
     let is_water = |t: Terrain| matches!(t, Terrain::Sea | Terrain::Lake | Terrain::River);
     let lat_t = (fy / MAP_H as f32).clamp(0.0, 1.0);
-    let micro1 = fbm(fx * 3.2, fy * 3.2, 701, 3) - 0.5;
+    let macro_patch = fbm(fx * 0.35, fy * 0.35, 613, 3);
+    let micro1 = fbm(fx * 3.4, fy * 3.4, 701, 3) - 0.5;
     let micro2 = hash2(x * scale + px, y * scale + py, 707) - 0.5;
 
     let tile_surface_color = |t: Terrain, sh: f32| -> [f32; 3] {
         match t {
-            Terrain::Sea => lerp3([0.06, 0.17, 0.35], [0.11, 0.26, 0.47], sh),
-            Terrain::Lake => [0.15, 0.36, 0.54],
-            Terrain::River => [0.18 + micro1 * 0.06, 0.40 + micro1 * 0.06, 0.60 + micro1 * 0.06],
+            Terrain::Sea => {
+                let deep = lerp3([0.05, 0.16, 0.33], [0.10, 0.27, 0.48], sh);
+                lerp3(deep, [0.08, 0.22, 0.42], macro_patch * 0.35)
+            }
+            Terrain::Lake => lerp3([0.13, 0.35, 0.52], [0.18, 0.43, 0.60], macro_patch),
+            Terrain::River => [0.16 + micro1 * 0.05, 0.39 + micro1 * 0.06, 0.58 + micro1 * 0.06],
             Terrain::Plain => {
-                let north = [0.64, 0.58, 0.35];
-                let mid = [0.46, 0.56, 0.28];
-                let south = [0.32, 0.50, 0.23];
-                let g_col = if lat_t < 0.45 {
+                // 北方の黄土混じりの草原から中原の緑野・江南の瑞々しい草地への自然なグラデーション
+                let north = [0.60, 0.56, 0.33];
+                let mid = [0.42, 0.55, 0.25];
+                let south = [0.30, 0.49, 0.21];
+                let mut g_col = if lat_t < 0.45 {
                     lerp3(north, mid, (lat_t / 0.45).clamp(0.0, 1.0))
                 } else {
                     lerp3(mid, south, ((lat_t - 0.45) / 0.55).clamp(0.0, 1.0))
                 };
-                lerp3(g_col, [g_col[0] * 0.82, g_col[1] * 0.84, g_col[2] * 0.80], sh)
+                // Age of Empires 風の陽光が差す草むらの濃淡パッチ
+                g_col = lerp3(g_col, [g_col[0] * 1.12, g_col[1] * 1.10, g_col[2] * 0.94], (macro_patch - 0.35).clamp(0.0, 0.65));
+                lerp3(g_col, [g_col[0] * 0.80, g_col[1] * 0.82, g_col[2] * 0.78], sh)
             }
             Terrain::Steppe => {
-                let base = lerp3([0.70, 0.63, 0.40], [0.58, 0.54, 0.33], sh);
+                let base = lerp3([0.68, 0.60, 0.37], [0.55, 0.49, 0.29], sh);
                 [base[0] + micro1 * 0.08, base[1] + micro1 * 0.07, base[2] + micro1 * 0.05]
             }
             Terrain::Forest => {
-                let ground = [0.14, 0.28, 0.13];
-                let canopy = [0.22, 0.42, 0.18];
-                let sun_leaf = [0.34, 0.52, 0.22];
-                let tree_n = fbm(fx * 4.5, fy * 4.5, 909, 3);
-                if tree_n > 0.62 {
+                // 樹林の下草・苔・腐葉土の深い緑（上にAI生成森林スプライトが重なる）
+                let ground = [0.15, 0.29, 0.13];
+                let moss = [0.22, 0.39, 0.16];
+                let sun_leaf = [0.30, 0.47, 0.20];
+                let tree_n = fbm(fx * 3.8, fy * 3.8, 909, 3);
+                if tree_n > 0.64 {
                     sun_leaf
-                } else if tree_n > 0.38 {
-                    canopy
+                } else if tree_n > 0.36 {
+                    moss
                 } else {
                     ground
                 }
@@ -1124,7 +1211,7 @@ pub fn paint_aoe_terrain_pixel(
                 let h0 = fbm(fx * 1.6, fy * 1.6, 606, 3);
                 let h1 = fbm((fx + 0.15) * 1.6, (fy + 0.15) * 1.6, 606, 3);
                 let slope = (h0 - h1) * 3.2;
-                let base = lerp3([0.56, 0.48, 0.31], [0.46, 0.39, 0.25], sh);
+                let base = lerp3([0.55, 0.47, 0.30], [0.44, 0.38, 0.24], sh);
                 [
                     (base[0] + slope * 0.18).clamp(0.1, 0.9),
                     (base[1] + slope * 0.16).clamp(0.1, 0.9),
@@ -1132,16 +1219,16 @@ pub fn paint_aoe_terrain_pixel(
                 ]
             }
             Terrain::Mountain => {
+                // 山岳基部の岩盤と山裾の陰影（上にAI生成山岳スプライトが重なる）
                 let ridge = fbm(fx * 2.2, fy * 2.2, 505, 4);
                 let ridge_se = fbm((fx + 0.12) * 2.2, (fy + 0.12) * 2.2, 505, 4);
-                let lit = (ridge - ridge_se) * 4.2;
-                let mut rock = lerp3([0.36, 0.33, 0.31], [0.54, 0.50, 0.46], ridge);
-                rock = [rock[0] + lit * 0.22, rock[1] + lit * 0.21, rock[2] + lit * 0.20];
-                if ridge > 0.72 && hash2(x, y, 99) > 0.45 {
-                    let snow_t = ((ridge - 0.72) * 3.5).clamp(0.0, 1.0);
-                    rock = lerp3(rock, [0.88, 0.90, 0.92], snow_t);
-                }
-                rock
+                let lit = (ridge - ridge_se) * 3.6;
+                let rock = lerp3([0.34, 0.31, 0.28], [0.50, 0.46, 0.40], ridge);
+                [
+                    (rock[0] + lit * 0.18).clamp(0.12, 0.85),
+                    (rock[1] + lit * 0.17).clamp(0.12, 0.85),
+                    (rock[2] + lit * 0.15).clamp(0.12, 0.85),
+                ]
             }
         }
     };
@@ -1190,7 +1277,7 @@ pub fn paint_aoe_terrain_pixel(
             c = lerp3(c, shallow, shoal_t * 0.72);
             let foam = ((water_w - 0.48).abs() < 0.08) as i32 as f32;
             if foam > 0.0 && fbm(fx * 4.0, fy * 4.0, 808, 2) > 0.46 {
-                c = lerp3(c, [0.82, 0.88, 0.90], 0.38);
+                c = lerp3(c, [0.84, 0.90, 0.92], 0.40);
             }
         }
     }
@@ -1203,9 +1290,9 @@ pub fn paint_aoe_terrain_pixel(
         }
     } else {
         c = [
-            c[0] + micro1 * 0.05 + micro2 * 0.03,
-            c[1] + micro1 * 0.05 + micro2 * 0.03,
-            c[2] + micro1 * 0.04 + micro2 * 0.02,
+            c[0] + micro1 * 0.055 + micro2 * 0.03,
+            c[1] + micro1 * 0.055 + micro2 * 0.03,
+            c[2] + micro1 * 0.045 + micro2 * 0.02,
         ];
     }
 
@@ -1243,7 +1330,7 @@ pub fn draw_map_frame(g: &mut Gfx, mw: f32, mh: f32) {
     g.rect_outline(-0.15, -0.15, mw + 0.15, mh + 0.15, 0.2, [0.25, 0.18, 0.10, 1.0]);
 }
 
-/// ズームイン時に森林の木々や山脈の立体ピークを描画する
+/// 遠景（zoom < 5.0）用の森林・山脈の簡易立体表現（zoom >= 5.0 では Direct2D 側でAI生成スプライトを描画）
 pub fn draw_world_terrain_props(
     g: &mut Gfx,
     map: &crate::geo::Map,
@@ -1257,7 +1344,7 @@ pub fn draw_world_terrain_props(
     use crate::geo::{Map, Terrain};
     use crate::world::v2;
 
-    if zoom < 7.5 {
+    if zoom >= 5.0 || zoom < 3.5 {
         return;
     }
     for ty in y0..=y1 {
@@ -1266,225 +1353,68 @@ pub fn draw_world_terrain_props(
                 continue;
             }
             let center = v2(tx as f32 + 0.5, ty as f32 + 0.5);
-            let f = fog_at(center);
-            if f == 0 {
+            if fog_at(center) == 0 {
                 continue;
             }
-            let t = map.terrain[Map::idx(tx, ty)];
-            match t {
-                Terrain::Forest if zoom >= 9.0 => {
-                    // 1タイルあたり2〜3本の立体的な樹木を描画
-                    for k in 0..2 {
-                        let hx = hash2(tx * 3 + k, ty * 5, 11);
-                        let hy = hash2(tx * 7, ty * 3 + k, 19);
-                        let cx = tx as f32 + 0.22 + hx * 0.56;
-                        let cy = ty as f32 + 0.24 + hy * 0.52;
-                        let r = 0.22 + hash2(tx + k, ty, 23) * 0.10;
-                        // 地面への落影
-                        g.circle(cx + 0.08, cy + 0.10, r * 0.95, 7, [0.03, 0.06, 0.03, 0.38]);
-                        // 幹
-                        g.rect(cx - 0.035, cy, cx + 0.035, cy + r * 0.75, [0.32, 0.20, 0.11, 0.9]);
-                        // 樹冠（暗部・中間・日向の3層）
-                        g.circle(cx, cy, r, 8, [0.12, 0.28, 0.12, 0.95]);
-                        g.circle(cx - r * 0.15, cy - r * 0.15, r * 0.78, 8, [0.20, 0.42, 0.17, 0.95]);
-                        g.circle(cx - r * 0.28, cy - r * 0.28, r * 0.45, 6, [0.34, 0.56, 0.22, 0.9]);
-                    }
-                }
-                Terrain::Mountain => {
-                    // 複数ピークが連なる重厚な山岳マッシフ（北西日向・南東日陰・山裾の落影）
-                    let h1 = hash2(tx, ty, 31);
-                    let h2 = hash2(tx, ty, 37);
-                    let h3 = hash2(tx, ty, 43);
-                    let px = tx as f32 + 0.30 + h1 * 0.36;
-                    let py = ty as f32 + 0.08 + h2 * 0.24;
-                    let bx0 = tx as f32 - 0.18;
-                    let bx1 = tx as f32 + 1.18;
-                    let by = ty as f32 + 0.96;
-                    let mid_x = px + 0.06;
-
-                    // 山裾の落影
-                    g.tri((px + 0.12, py + 0.18), (mid_x, by), (bx1 + 0.08, by + 0.06), [0.06, 0.05, 0.05, 0.32]);
-                    // 北西斜面（日向の花崗岩・黄土岩肌）
-                    g.tri((px, py), (bx0, by), (mid_x, by), [0.56, 0.51, 0.45, 0.88]);
-                    // 南東斜面（深い日陰の岩肌）
-                    g.tri((px, py), (mid_x, by), (bx1, by), [0.27, 0.24, 0.22, 0.90]);
-                    // 副峰（隣のタイルと自然に繋がる肩の峰）
-                    let sx = tx as f32 + if h3 > 0.5 { 0.72 } else { 0.24 };
-                    let sy = ty as f32 + 0.34 + h3 * 0.18;
-                    g.tri((sx, sy), (sx - 0.38, by + 0.04), (sx + 0.04, by + 0.04), [0.50, 0.46, 0.41, 0.82]);
-                    g.tri((sx, sy), (sx + 0.04, by + 0.04), (sx + 0.42, by + 0.04), [0.23, 0.20, 0.19, 0.85]);
-                    // 冠雪・明るい岩稜ハイライト
-                    if h1 > 0.52 {
-                        let snow_y = py + (by - py) * 0.36;
-                        g.tri((px, py), (px - 0.22, snow_y), (px + 0.03, snow_y + 0.05), [0.90, 0.91, 0.93, 0.92]);
-                        g.tri((px, py), (px + 0.03, snow_y + 0.05), (px + 0.22, snow_y), [0.68, 0.71, 0.75, 0.90]);
-                    }
-                }
-                _ => {}
+            if map.terrain[Map::idx(tx, ty)] == Terrain::Mountain {
+                let px = tx as f32 + 0.48;
+                let py = ty as f32 + 0.18;
+                let by = ty as f32 + 0.94;
+                g.tri((px, py), (tx as f32 - 0.1, by), (px + 0.05, by), [0.54, 0.49, 0.43, 0.85]);
+                g.tri((px, py), (px + 0.05, by), (tx as f32 + 1.1, by), [0.26, 0.23, 0.21, 0.88]);
             }
         }
     }
 }
 
-/// 銅山（岩肌・坑道入口・青銅鉱脈と孔雀石の輝き）を描画
+/// 銅山の下地影（zoom < 5.0 ではポリゴン描画、zoom >= 5.0 では Direct2D 側でAI生成スプライトを描画）
 pub fn draw_world_mine(g: &mut Gfx, c: crate::world::V2, amount: f32, px: f32) {
     let s = 0.36 + 0.16 * (amount / 2500.0).clamp(0.2, 1.0);
-    // 影
-    g.circle(c.x + 0.06, c.y + 0.12, s * 1.05, 10, [0.0, 0.0, 0.0, 0.35]);
-    // 岩山のベース（多角形の岩塊）
+    g.circle(c.x + 0.05, c.y + 0.12, s * 0.95, 10, [0.0, 0.0, 0.0, 0.30]);
+    if px <= 1.0 / 5.0 {
+        return;
+    }
     g.tri((c.x - s, c.y + s * 0.65), (c.x - s * 0.35, c.y - s * 0.85), (c.x + s * 0.2, c.y + s * 0.65), [0.52, 0.44, 0.36, 1.0]);
     g.tri((c.x - s * 0.35, c.y - s * 0.85), (c.x + s * 0.45, c.y - s * 0.65), (c.x + s, c.y + s * 0.65), [0.36, 0.30, 0.24, 1.0]);
-    g.tri((c.x - s, c.y + s * 0.65), (c.x - s * 0.35, c.y - s * 0.85), (c.x + s, c.y + s * 0.65), [0.44, 0.36, 0.28, 0.7]);
-    // 坑道入口（木枠と暗がり）
-    let mw = s * 0.36;
-    let mh = s * 0.42;
-    g.rect(c.x - mw, c.y + s * 0.65 - mh, c.x + mw, c.y + s * 0.65, [0.08, 0.06, 0.05, 1.0]);
-    g.rect_outline(c.x - mw, c.y + s * 0.65 - mh, c.x + mw, c.y + s * 0.65, (1.5 * px).max(0.04), [0.58, 0.38, 0.20, 1.0]);
-    // 輝く銅鉱石・孔雀石の鉱脈
-    for &(ox, oy, r, col) in &[
-        (-0.35, -0.15, 0.13, [0.95, 0.62, 0.24, 1.0]),
-        (0.28, -0.22, 0.12, [1.0, 0.78, 0.35, 1.0]),
-        (-0.12, -0.45, 0.11, [0.28, 0.85, 0.65, 1.0]),
-        (0.42, 0.15, 0.11, [0.92, 0.55, 0.20, 1.0]),
-    ] {
-        g.circle(c.x + ox * s, c.y + oy * s, r * s * 2.2, 6, col);
-    }
+    g.circle(c.x, c.y, s * 0.32, 6, [0.32, 0.85, 0.65, 1.0]);
 }
 
-/// 建物（都・邑・兵営・田）を Age of Empires 風の中国建築として描画
+/// 建物（都・邑・兵営・田）の地面基壇・国色境界を描画（本体は Direct2D 側でAI生成スプライトを描画）
 pub fn draw_world_building(g: &mut Gfx, b: &crate::world::Building, nc: [f32; 3], px: f32) {
     let (x0, y0, x1, y1) = (b.tx as f32, b.ty as f32, b.tx as f32 + 2.0, b.ty as f32 + 2.0);
     let c = b.center();
     let alpha = if b.done() { 1.0 } else { 0.62 };
 
-    match b.kind {
-        BKind::Farm => {
-            // 地面の影と木柵の枠
-            g.rect(x0 + 0.04, y0 + 0.04, x1 - 0.04, y1 - 0.04, [0.34, 0.26, 0.15, alpha]);
-            // 灌漑水路
-            g.rect(x0 + 0.10, y0 + 0.10, x1 - 0.10, y1 - 0.10, [0.24, 0.44, 0.56, alpha * 0.85]);
-            // 4列の肥沃な畝（うね）と黄金の穀物
-            for r in 0..4 {
-                let ry0 = y0 + 0.14 + r as f32 * 0.44;
-                let ry1 = ry0 + 0.32;
-                g.rect(x0 + 0.14, ry0, x1 - 0.14, ry1, [0.46, 0.38, 0.20, alpha]);
-                for col in 0..6 {
-                    let cx = x0 + 0.24 + col as f32 * 0.26;
-                    g.circle(cx, (ry0 + ry1) * 0.5, 0.09, 6, [0.85, 0.76, 0.28, alpha]);
-                    g.circle(cx - 0.02, (ry0 + ry1) * 0.5 - 0.02, 0.05, 5, [0.55, 0.78, 0.28, alpha]);
-                }
+    if px <= 1.0 / 2.2 {
+        // 建物の地面落影と国色トリム台座（上部に Direct2D で高精細AI生成建物スプライトを重ねる）
+        match b.kind {
+            BKind::Farm => {
+                g.rect(x0 + 0.06, y0 + 0.06, x1 - 0.06, y1 - 0.06, [0.28, 0.22, 0.13, 0.45 * alpha]);
+                g.rect_outline(x0 + 0.04, y0 + 0.04, x1 - 0.04, y1 - 0.04, (1.6 * px).max(0.05), c4(nc, 0.72 * alpha));
             }
-            // 北西角の茅葺き農舎
-            g.rect(x0 + 0.12, y0 + 0.12, x0 + 0.68, y0 + 0.58, [0.22, 0.16, 0.10, alpha]);
-            g.tri((x0 + 0.08, y0 + 0.58), (x0 + 0.40, y0 + 0.08), (x0 + 0.72, y0 + 0.58), [0.82, 0.68, 0.34, alpha]);
-            // 国色の境界標
-            g.rect_outline(x0 + 0.05, y0 + 0.05, x1 - 0.05, y1 - 0.05, (1.5 * px).max(0.05), c4(nc, alpha * 0.9));
-        }
-        BKind::Barracks => {
-            // 落影
-            g.rect(x0 + 0.14, y0 + 0.18, x1 - 0.02, y1 - 0.02, [0.0, 0.0, 0.0, 0.35 * alpha]);
-            // 練兵場の石畳と木柵
-            g.rect(x0 + 0.08, y0 + 0.08, x1 - 0.08, y1 - 0.08, [0.48, 0.42, 0.34, alpha]);
-            g.rect_outline(x0 + 0.08, y0 + 0.08, x1 - 0.08, y1 - 0.08, 0.08, [0.32, 0.22, 0.14, alpha]);
-            // 北側の兵舎本殿（瓦屋根と国色の軒）
-            let rx0 = x0 + 0.16;
-            let rx1 = x1 - 0.16;
-            let ry0 = y0 + 0.14;
-            let ry1 = y0 + 1.18;
-            g.rect(rx0, ry0 + 0.15, rx1, ry1, c4(darker(nc, 0.55), alpha));
-            // 屋根の南北斜面
-            let rmid = (ry0 + ry1) * 0.5;
-            quad(g, (rx0 - 0.06, rmid), (rx1 + 0.06, rmid), (rx1, ry0), (rx0, ry0), [0.26, 0.28, 0.32, alpha]);
-            quad(g, (rx0, ry1), (rx1, ry1), (rx1 + 0.06, rmid), (rx0 - 0.06, rmid), [0.18, 0.20, 0.24, alpha]);
-            // 黄金と国色の棟飾り
-            g.line((rx0 - 0.04, rmid), (rx1 + 0.04, rmid), 0.09, c4(lighter(nc, 0.15), alpha));
-            g.rect_outline(rx0, ry0, rx1, ry1, 0.05, [0.88, 0.74, 0.36, alpha]);
-            // 南庭の陣太鼓と武器掛け・軍旗
-            g.circle(x0 + 0.55, y1 - 0.45, 0.20, 10, [0.78, 0.20, 0.16, alpha]);
-            g.circle(x0 + 0.55, y1 - 0.45, 0.13, 10, [0.95, 0.86, 0.62, alpha]);
-            // 武器掛け（戈の列）
-            g.rect(x1 - 0.78, y1 - 0.55, x1 - 0.24, y1 - 0.35, [0.35, 0.24, 0.14, alpha]);
-            for k in 0..3 {
-                let gx = x1 - 0.70 + k as f32 * 0.18;
-                g.line((gx, y1 - 0.62), (gx, y1 - 0.28), 0.04, [0.92, 0.85, 0.65, alpha]);
+            BKind::Barracks => {
+                g.circle(c.x + 0.06, c.y + 0.14, 1.02, 16, [0.0, 0.0, 0.0, 0.34 * alpha]);
+                g.rect_outline(x0 + 0.08, y0 + 0.08, x1 - 0.08, y1 - 0.08, (1.8 * px).max(0.06), c4(nc, 0.78 * alpha));
             }
-            // 国色の軍旗
-            g.line((x0 + 0.24, y1 - 0.18), (x0 + 0.24, y1 - 0.75), 0.05, [0.85, 0.75, 0.55, alpha]);
-            g.tri((x0 + 0.24, y1 - 0.75), (x0 + 0.62, y1 - 0.60), (x0 + 0.24, y1 - 0.45), c4(nc, alpha));
-        }
-        BKind::Capital | BKind::Town => {
-            let cap = b.kind == BKind::Capital;
-            let e = if cap { -0.28 } else { -0.04 };
-            let (wx0, wy0, wx1, wy1) = (x0 + e, y0 + e, x1 - e, y1 - e);
-            // 城郭の落影
-            g.rect(wx0 + 0.10, wy0 + 0.12, wx1 + 0.12, wy1 + 0.14, [0.0, 0.0, 0.0, 0.42 * alpha]);
-            // 外郭の石垣・版築城壁
-            g.rect(wx0, wy0, wx1, wy1, [0.58, 0.53, 0.45, alpha]);
-            g.rect_outline(wx0, wy0, wx1, wy1, (2.0 * px).max(0.06), [0.22, 0.18, 0.14, alpha]);
-            // 城内の石畳広場
-            let wall_t = if cap { 0.24 } else { 0.20 };
-            g.rect(wx0 + wall_t, wy0 + wall_t, wx1 - wall_t, wy1 - wall_t, [0.38, 0.35, 0.30, alpha]);
-            g.rect_outline(wx0 + wall_t, wy0 + wall_t, wx1 - wall_t, wy1 - wall_t, 0.06, c4(darker(nc, 0.7), alpha));
-
-            // 城壁上の女垣（クレネレーション）
-            let steps = if cap { 7 } else { 5 };
-            let span = (wx1 - wx0) / steps as f32;
-            for k in 0..steps {
-                let bx = wx0 + k as f32 * span + span * 0.15;
-                let bw = span * 0.55;
-                g.rect(bx, wy0 - 0.04, bx + bw, wy0 + 0.08, [0.72, 0.66, 0.56, alpha]);
-                g.rect(bx, wy1 - 0.08, bx + bw, wy1 + 0.04, [0.46, 0.42, 0.35, alpha]);
+            BKind::Town => {
+                g.circle(c.x + 0.08, c.y + 0.16, 1.18, 18, [0.0, 0.0, 0.0, 0.38 * alpha]);
+                g.rect_outline(x0 + 0.02, y0 + 0.02, x1 - 0.02, y1 - 0.02, (2.0 * px).max(0.07), c4(nc, 0.82 * alpha));
             }
-
-            // 南門（朱塗りの城門と石橋）
-            g.rect(c.x - 0.26, wy1 - wall_t - 0.04, c.x + 0.26, wy1 + 0.05, [0.20, 0.14, 0.10, alpha]);
-            g.rect(c.x - 0.20, wy1 - wall_t, c.x + 0.20, wy1 + 0.04, [0.68, 0.20, 0.15, alpha]);
-
-            // 四隅の角楼（望楼）
-            let tr = if cap { 0.24 } else { 0.18 };
-            for (tx, ty) in [(wx0, wy0), (wx1, wy0), (wx0, wy1), (wx1, wy1)] {
-                g.rect(tx - tr, ty - tr, tx + tr, ty + tr, [0.28, 0.26, 0.24, alpha]);
-                g.rect_outline(tx - tr, ty - tr, tx + tr, ty + tr, 0.04, [0.78, 0.64, 0.34, alpha]);
-                g.rect(tx - tr * 0.6, ty - tr * 0.6, tx + tr * 0.6, ty + tr * 0.6, c4(nc, alpha));
-            }
-
-            // 中央の宮殿・政庁（反り屋根と黄金の棟）
-            let pw = if cap { 0.78 } else { 0.56 };
-            let ph = if cap { 0.62 } else { 0.46 };
-            // 白石の基壇（玉階）
-            g.rect(c.x - pw * 1.08, c.y - ph * 1.08, c.x + pw * 1.08, c.y + ph * 1.08, [0.76, 0.72, 0.64, alpha]);
-            // 宮殿の正面階段
-            g.rect(c.x - 0.18, c.y + ph * 0.8, c.x + 0.18, c.y + ph * 1.22, [0.86, 0.82, 0.74, alpha]);
-            // 下層の大屋根（国色）
-            g.rect(c.x - pw, c.y - ph, c.x + pw, c.y + ph, c4(darker(nc, 0.75), alpha));
-            quad(
-                g,
-                (c.x - pw, c.y - ph),
-                (c.x + pw, c.y - ph),
-                (c.x + pw * 0.82, c.y),
-                (c.x - pw * 0.82, c.y),
-                c4(lighter(nc, 0.12), alpha),
-            );
-            g.rect_outline(c.x - pw, c.y - ph, c.x + pw, c.y + ph, 0.05, [0.92, 0.78, 0.36, alpha]);
-
-            if cap {
-                // 国都は二層の重層宮殿＋黄金の屋根と鴟尾
-                let uw = pw * 0.62;
-                let uh = ph * 0.62;
-                g.rect(c.x - uw, c.y - uh, c.x + uw, c.y + uh, [0.92, 0.74, 0.24, alpha]);
-                g.rect(c.x - uw * 0.75, c.y - uh * 0.75, c.x + uw * 0.75, c.y + uh * 0.75, c4(nc, alpha));
-                g.line((c.x - uw * 0.9, c.y), (c.x + uw * 0.9, c.y), 0.09, [1.0, 0.92, 0.55, alpha]);
-                g.circle(c.x - uw * 0.85, c.y, 0.07, 6, [1.0, 0.90, 0.45, alpha]);
-                g.circle(c.x + uw * 0.85, c.y, 0.07, 6, [1.0, 0.90, 0.45, alpha]);
-            } else {
-                // 邑の棟飾り
-                g.line((c.x - pw * 0.75, c.y), (c.x + pw * 0.75, c.y), 0.08, [0.95, 0.82, 0.42, alpha]);
+            BKind::Capital => {
+                g.circle(c.x + 0.10, c.y + 0.18, 1.42, 20, [0.0, 0.0, 0.0, 0.42 * alpha]);
+                g.rect_outline(x0 - 0.14, y0 - 0.14, x1 + 0.14, y1 + 0.14, (2.2 * px).max(0.08), c4(nc, 0.88 * alpha));
             }
         }
+        return;
     }
+
+    // 超広域ズームアウト時（zoom < 5.0）のフォールバック描画
+    let e = if b.kind == BKind::Capital { -0.25 } else { 0.0 };
+    g.rect(x0 + e, y0 + e, x1 - e, y1 - e, c4(darker(nc, 0.75), alpha));
+    g.rect_outline(x0 + e, y0 + e, x1 - e, y1 - e, (1.8 * px).max(0.06), [0.92, 0.78, 0.36, alpha]);
 }
 
-/// ユニット（民・戈兵・弩兵・戦車／騎兵）を Age of Empires 風の兵士・車馬として描画
+/// ユニット（民・戈兵・弩兵・戦車／騎兵）の足元リング・落影を描画（本体は Direct2D 側でAI生成スプライトを描画）
 pub fn draw_world_unit(
     g: &mut Gfx,
     u: &crate::world::Unit,
@@ -1498,12 +1428,10 @@ pub fn draw_world_unit(
     let p = u.pos;
     let body = if u.flash > 0.0 { [1.0, 1.0, 1.0, 1.0] } else { c4(nc, 1.0) };
     let dark = c4(darker(nc, 0.32), 1.0);
-    let light = c4(lighter(nc, 0.22), 1.0);
-    let skin = [0.94, 0.78, 0.62, 1.0];
     let bronze = [0.92, 0.76, 0.36, 1.0];
     let wood = [0.52, 0.34, 0.18, 1.0];
 
-    let sz = 1.25 + 0.12 * (u.power - 1.0).min(5.0);
+    let sz = 0.82 + 0.06 * (u.power - 1.0).min(5.0);
     let d = if u.dir.len() > 0.01 { u.dir.norm() } else { v2(0.0, 1.0) };
     let n = v2(-d.y, d.x);
     let pt = |fwd: f32, side: f32| -> (f32, f32) {
@@ -1511,109 +1439,47 @@ pub fn draw_world_unit(
         (v.x, v.y)
     };
 
-    // 足元の落影と国色の台座リング
-    g.circle(p.x + 0.06, p.y + 0.11, 0.36 * sz, 12, [0.0, 0.0, 0.0, 0.32]);
+    // 足元の落影と国色の台座リング（縮小したユニットサイズに合わせてコンパクト化）
+    g.circle(p.x + 0.03, p.y + 0.10, 0.25 * sz, 12, [0.0, 0.0, 0.0, 0.32]);
     if u.selected {
-        g.ring(p.x, p.y, 0.56, (2.2 * px).max(0.05), 20, [0.35, 1.0, 0.45, 0.98]);
-        g.ring(p.x, p.y, 0.50, px.max(0.03), 20, [0.95, 1.0, 0.75, 0.65]);
-    } else {
-        g.ring(p.x, p.y, 0.33 * sz, (1.2 * px).max(0.03), 12, [nc[0], nc[1], nc[2], 0.55]);
+        g.ring(p.x, p.y + 0.08, 0.38, (2.0 * px).max(0.045), 18, [0.35, 1.0, 0.45, 0.98]);
+        g.ring(p.x, p.y + 0.08, 0.33, px.max(0.025), 18, [0.95, 1.0, 0.75, 0.65]);
+    }
+    if px <= 1.0 / 6.5 {
+        // ズーム時は Direct2D 側で高精細AI生成ユニットスプライトを描画するため、足元に国色台座リングのみ描画
+        g.circle(p.x, p.y + 0.08, 0.22 * sz, 12, [nc[0] * 0.65, nc[1] * 0.65, nc[2] * 0.65, 0.48]);
+        g.ring(p.x, p.y + 0.08, 0.24 * sz, (1.5 * px).max(0.038), 14, [nc[0] * 0.65 + 0.35, nc[1] * 0.65 + 0.35, nc[2] * 0.65 + 0.35, 0.92]);
+        if u.flash > 0.0 {
+            g.circle(p.x, p.y, 0.28 * sz, 12, [1.0, 0.95, 0.85, 0.55]);
+        }
+        return;
+    } else if !u.selected {
+        g.ring(p.x, p.y, 0.24 * sz, (1.2 * px).max(0.03), 10, [nc[0], nc[1], nc[2], 0.55]);
     }
 
     match u.kind {
         UnitKind::Worker => {
-            // 道具（鍬・伐採斧）の柄と刃
-            g.line(pt(-0.10, 0.16), pt(0.28, 0.22), (1.8 * px).max(0.045), wood);
-            g.line(pt(0.26, 0.14), pt(0.28, 0.28), (2.0 * px).max(0.055), [0.82, 0.85, 0.88, 1.0]);
-            // 麻衣の肩と胴体
             let r = 0.20 * sz;
-            g.circle(p.x, p.y, r + 1.5 * px, 12, dark);
-            g.circle(p.x, p.y, r, 12, body);
-            // 菅笠（編み笠）
-            g.circle(p.x, p.y, r * 0.72, 10, [0.88, 0.76, 0.44, 1.0]);
-            g.circle(p.x, p.y, r * 0.32, 8, [0.68, 0.54, 0.26, 1.0]);
-            // 運搬中の資源袋
+            g.circle(p.x, p.y, r + 1.5 * px, 10, dark);
+            g.circle(p.x, p.y, r, 10, body);
             if u.carry > 0.5 {
                 let cc = res_colors[u.carry_kind];
                 let (bx, by) = pt(-0.16, -0.18);
-                g.circle(bx, by, 0.13 * sz, 8, [0.15, 0.10, 0.06, 0.9]);
                 g.circle(bx, by, 0.10 * sz, 8, cc);
             }
         }
-        UnitKind::Infantry => {
-            let r = 0.24 * sz;
-            // 長柄の青銅戈（か）
-            g.line(pt(-0.22, 0.18), pt(0.52, 0.18), (2.0 * px).max(0.05), wood);
-            // 戈の横刃と穂先
-            g.tri(pt(0.56, 0.18), pt(0.38, 0.18), pt(0.42, 0.02), [1.0, 0.92, 0.62, 1.0]);
-            g.tri(pt(0.62, 0.18), pt(0.46, 0.14), pt(0.46, 0.22), bronze);
-            // 札甲（鎧）の肩と胴
-            g.circle(p.x, p.y, r + 1.6 * px, 12, dark);
-            g.circle(p.x, p.y, r, 12, body);
-            g.circle(p.x, p.y, r * 0.75, 10, light);
-            // 左腕の盾（黒漆と金枠）
-            quad(g, pt(0.22, -0.26), pt(0.24, -0.12), pt(-0.16, -0.12), pt(-0.18, -0.26), [0.18, 0.12, 0.09, 1.0]);
-            quad(g, pt(0.18, -0.24), pt(0.20, -0.14), pt(-0.12, -0.14), pt(-0.14, -0.24), bronze);
-            // 青銅兜と赤い飾り（纓）
-            g.circle(p.x, p.y, r * 0.48, 10, bronze);
-            let (hx, hy) = pt(-0.08, 0.0);
-            g.circle(hx, hy, r * 0.24, 6, [0.92, 0.20, 0.16, 1.0]);
-        }
-        UnitKind::Archer => {
+        UnitKind::Infantry | UnitKind::Archer => {
             let r = 0.22 * sz;
-            // 背中の箙（矢筒）
-            let (qx, qy) = pt(-0.18, -0.14);
-            g.circle(qx, qy, 0.09 * sz, 6, [0.48, 0.30, 0.16, 1.0]);
-            // 胴体と肩当て
-            g.circle(p.x, p.y, r + 1.5 * px, 12, dark);
-            g.circle(p.x, p.y, r, 12, body);
-            // 前方に構えた大型の弩（クロスボウ）
-            g.line(pt(0.05, 0.0), pt(0.46, 0.0), (2.0 * px).max(0.05), wood);
-            // 弩の弓幹
-            g.line(pt(0.36, -0.28), pt(0.44, 0.0), (1.8 * px).max(0.045), bronze);
-            g.line(pt(0.44, 0.0), pt(0.36, 0.28), (1.8 * px).max(0.045), bronze);
-            // 弦と矢
-            g.line(pt(0.36, -0.28), pt(0.18, 0.0), px.max(0.025), [0.90, 0.88, 0.82, 0.85]);
-            g.line(pt(0.36, 0.28), pt(0.18, 0.0), px.max(0.025), [0.90, 0.88, 0.82, 0.85]);
-            // 頭部（革兜）
-            g.circle(p.x, p.y, r * 0.48, 10, skin);
-            g.circle(p.x, p.y, r * 0.42, 8, dark);
+            g.circle(p.x, p.y, r + 1.5 * px, 10, dark);
+            g.circle(p.x, p.y, r, 10, body);
+            g.circle(p.x, p.y, r * 0.48, 8, bronze);
         }
         UnitKind::Chariot => {
-            if era == Era::Spring {
-                // 春秋時代：二頭立ての戦車（車輪・車箱・軍馬・旗）
-                // 前方の二頭の軍馬
-                for &side in &[-0.17, 0.17] {
-                    quad(g, pt(0.48, side - 0.08), pt(0.48, side + 0.08), pt(0.10, side + 0.09), pt(0.10, side - 0.09), [0.46, 0.26, 0.14, 1.0]);
-                    let (hx, hy) = pt(0.52, side);
-                    g.circle(hx, hy, 0.07 * sz, 6, [0.58, 0.34, 0.18, 1.0]);
-                }
-                // 衡（くびき）と轅（ながえ）
-                g.line(pt(0.38, -0.24), pt(0.38, 0.24), (1.6 * px).max(0.04), bronze);
-                g.line(pt(-0.10, 0.0), pt(0.42, 0.0), (1.8 * px).max(0.045), wood);
-                // 左右の大車輪
-                quad(g, pt(0.06, -0.34), pt(0.06, -0.26), pt(-0.30, -0.26), pt(-0.30, -0.34), bronze);
-                quad(g, pt(0.06, 0.26), pt(0.06, 0.34), pt(-0.30, 0.34), pt(-0.30, 0.26), bronze);
-                // 車箱（輿）
-                quad(g, pt(0.08, -0.25), pt(0.08, 0.25), pt(-0.28, 0.25), pt(-0.28, -0.25), dark);
-                quad(g, pt(0.04, -0.21), pt(0.04, 0.21), pt(-0.24, 0.21), pt(-0.24, -0.21), body);
-                // 車上の兵士と長戈
-                let (wx, wy) = pt(-0.10, 0.0);
-                g.circle(wx, wy, 0.11 * sz, 8, bronze);
-                g.line(pt(-0.22, 0.18), pt(0.45, 0.26), (1.8 * px).max(0.045), [0.95, 0.90, 0.72, 1.0]);
-            } else {
-                // 戦国時代：胡服騎射・重装騎兵
-                // 軍馬の胴体と首・頭部
-                quad(g, pt(0.42, -0.14), pt(0.42, 0.14), pt(-0.34, 0.16), pt(-0.34, -0.16), [0.44, 0.25, 0.13, 1.0]);
-                g.tri(pt(0.58, 0.0), pt(0.34, -0.12), pt(0.34, 0.12), [0.56, 0.33, 0.18, 1.0]);
-                // 鞍と騎兵の鎧
-                let r = 0.21 * sz;
-                g.circle(p.x, p.y, r + 1.5 * px, 10, dark);
-                g.circle(p.x, p.y, r, 10, body);
-                g.circle(p.x, p.y, r * 0.52, 8, bronze);
-                // 突撃槍
-                g.line(pt(-0.24, 0.18), pt(0.62, 0.14), (2.0 * px).max(0.05), [0.95, 0.90, 0.75, 1.0]);
-            }
+            let _ = (era, wood);
+            let r = 0.25 * sz;
+            g.circle(p.x, p.y, r + 1.5 * px, 10, dark);
+            g.circle(p.x, p.y, r, 10, body);
+            g.circle(p.x, p.y, r * 0.52, 8, bronze);
         }
     }
 }

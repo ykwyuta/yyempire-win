@@ -206,11 +206,11 @@ fn think(w: &mut World, n: usize, a: &mut AiState) {
         let p = x.2;
         let src = match best_k {
             0 => w.free_farm(n, p).map(Src::Farm),
-            2 => w.nearest_mine(p, 22.0).map(Src::Mine),
+            2 => w.nearest_mine_for(Some(n), p, 22.0).map(Src::Mine),
             _ => None,
         }
-        .or_else(|| w.nearest_forest(p, 16).map(|(x, y)| Src::Forest(x, y)))
-        .or_else(|| w.nearest_mine(p, 30.0).map(Src::Mine));
+        .or_else(|| w.nearest_forest_for(Some(n), p, 16).map(|(x, y)| Src::Forest(x, y)))
+        .or_else(|| w.nearest_mine_for(Some(n), p, 30.0).map(Src::Mine));
         if let Some(s) = src {
             gathering[s.res()] += 1;
             w.order_gather(&[x.0], s);

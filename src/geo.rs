@@ -307,16 +307,20 @@ pub fn generate_map(seed: u32) -> Map {
             }
             let mut t = Terrain::Plain;
             // 北方草原・オルドス
-            let steppe = (lat > 40.8 && lon < 116.5) || (lon > 106.5 && lon < 110.8 && lat > 38.3 && lat < 40.6) || (lat > 37.0 && lon < 106.0);
+            let wlon = lon + (nz - 0.5) * 2.4 + (nz2 - 0.5) * 1.1;
+            let wlat = lat + (nz2 - 0.5) * 2.0 + (nz - 0.5) * 0.9;
+            let ordos_d = ((wlon - 108.6) / 2.4).powi(2) + ((wlat - 39.4) / 1.4).powi(2);
+            let steppe = (wlat > 40.6 && wlon < 116.8) || ordos_d < 1.0 || (wlat > 36.8 && wlon < 106.2);
             if steppe {
                 t = Terrain::Steppe;
             }
             // 黄土高原の丘陵
-            if lon > 104.5 && lon < 111.0 && lat > 35.0 && lat < 38.5 && nz2 > 0.55 {
+            let loess_d = ((wlon - 107.8) / 3.6).powi(2) + ((wlat - 36.7) / 2.1).powi(2);
+            if loess_d < 1.0 && nz2 > 0.54 {
                 t = Terrain::Hill;
             }
             // 雲貴高原・嶺南・閩の丘陵
-            if (lon < 109.5 && lat < 28.5) || (lat < 26.0) || (lon > 116.5 && lat < 28.5) {
+            if (wlon < 109.6 && wlat < 28.6) || (wlat < 26.2) || (wlon > 116.3 && wlat < 28.6) {
                 if nz2 > 0.42 {
                     t = Terrain::Hill;
                 }
