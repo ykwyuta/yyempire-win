@@ -1,4 +1,4 @@
-//! ゲーム世界のシミュレーション（ユニット・建物・経済・戦闘・外交・イベント）
+﻿//! ゲーム世界のシミュレーション（ユニット・建物・経済・戦闘・外交・イベント）
 
 use crate::ai::AiState;
 use crate::geo::*;
@@ -7,7 +7,11 @@ use crate::rng::Rng;
 use std::collections::VecDeque;
 
 mod history;
+mod trade;
+mod traits;
 pub use history::{Chron, HKind, Person, HISTORY, INITIAL_HOUSE};
+pub use trade::*;
+pub use traits::*;
 
 #[derive(Clone, Copy, Default, Debug, PartialEq)]
 pub struct V2 {
@@ -56,6 +60,8 @@ impl V2 {
 }
 
 pub const SEC_PER_YEAR: f32 = 4.0;
+/// 戦国時代は時間の流れを遅くする（1年＝8秒）
+pub const WARRING_SLOW: f32 = 2.0;
 pub const START_BC: f32 = 770.0;
 pub const WARRING_BC: f32 = 453.0;
 pub const END_BC: f32 = 221.0;
@@ -151,14 +157,14 @@ impl UnitKind {
     }
     pub fn speed(self, era: Era) -> f32 {
         match self {
-            UnitKind::Worker => 1.6,
-            UnitKind::Infantry => 1.5,
-            UnitKind::Archer => 1.4,
+            UnitKind::Worker => 1.9,
+            UnitKind::Infantry => 1.9,
+            UnitKind::Archer => 1.75,
             UnitKind::Chariot => {
                 if era == Era::Spring {
-                    2.3
+                    2.9
                 } else {
-                    2.8
+                    3.5
                 }
             }
         }
@@ -308,6 +314,10 @@ pub struct Unit {
     pub flash: f32,
     pub selected: bool,
     pub last_attacker: Option<Handle>,
+    /// 部族の兵・傭兵の出身部族（NONE=なし）
+    pub tribe: u8,
+    /// 傭兵の契約満了年（0=傭兵ではない）
+    pub merc_until: f32,
 }
 
 impl Unit {
@@ -377,6 +387,14 @@ pub struct Nation {
     /// 人物による生産・武の倍率
     pub eco_mul: f32,
     pub mil_mul: f32,
+    /// 銭（商人からの税収）
+    pub coin: f32,
+    pub coin_earned: f32,
+    pub coin_income: f32,
+    /// 税率 0:軽税 1:中税 2:重税
+    pub tax: u8,
+    /// 国の特徴による補正
+    pub tm: TraitMods,
 }
 
 impl Nation {
@@ -461,8 +479,12 @@ pub struct World {
     pub game_over: Option<(bool, String)>,
     /// チュートリアル中はプレイヤーへの宣戦を禁じる
     pub protect_player: bool,
+    /// プレイヤーが部隊に命令した回数
+    pub player_orders: u32,
     pub time: f32,
     pub ai: Vec<AiState>,
+    /// 商人・西域の商人・山岳民と遊牧民
+    pub trade: Trade,
     stat_t: f32,
     income_t: f32,
     year_tick: f32,
@@ -511,8 +533,10 @@ impl World {
             terrain_dirty: Vec::new(),
             game_over: None,
             protect_player: false,
+            player_orders: 0,
             time: 0.0,
             ai: Vec::new(),
+            trade: Trade::new(&mut Rng::new(seed as u64 * 13 + 5)),
             stat_t: 0.0,
             income_t: 0.0,
             year_tick: 0.0,
@@ -547,9 +571,49 @@ impl World {
                 figures: Vec::new(),
                 eco_mul: 1.0,
                 mil_mul: 1.0,
+                coin: 0.0,
+                coin_earned: 0.0,
+                coin_income: 0.0,
+                tax: 1,
+                tm: TraitMods::NONE,
             });
             w.ai.push(AiState::new(i as u64 * 31 + seed as u64));
         }
+        // 部族の兵の仮の枠（国としては扱わない）
+        w.nations.push(Nation {
+            def: TRIBE,
+            name: "夷狄",
+            color: [0.62, 0.42, 0.24],
+            bias: 0.0,
+            alive: false,
+            appeared: false,
+            res: [0.0; 3],
+            aggression: 0.0,
+            hegemon_cd: 0.0,
+            capital: None,
+            workers: 0,
+            soldiers: 0,
+            q_workers: 0,
+            q_soldiers: 0,
+            cities: 0,
+            mil_power: 0.0,
+            eco_power: 0.0,
+            tiles: 0,
+            upkeep: 0.0,
+            strength: 0.0,
+            earned: [0.0; 3],
+            income: [0.0; 3],
+            home: v2(0.0, 0.0),
+            house: "",
+            figures: Vec::new(),
+            eco_mul: 1.0,
+            mil_mul: 1.0,
+            coin: 0.0,
+            coin_earned: 0.0,
+            coin_income: 0.0,
+            tax: 1,
+            tm: TraitMods::NONE,
+        });
         for i in 0..nn {
             let d = &NATIONS[i];
             if d.dormant {
@@ -572,6 +636,7 @@ impl World {
         }
         w.recompute_territory();
         w.update_stats();
+        w.refresh_traits();
         w
     }
 
@@ -658,6 +723,8 @@ impl World {
             flash: 0.0,
             selected: false,
             last_attacker: None,
+            tribe: NONE,
+            merc_until: 0.0,
         };
         if let Some(i) = self.free_units.pop() {
             let gen = self.units[i as usize].gen + 1;
@@ -720,7 +787,7 @@ impl World {
                     }
                 }
                 // 自国領から遠すぎない
-                let near = self.blds.iter().any(|b| b.alive && b.nation as usize == nation && b.kind.city() && b.center().dist(c) < 22.0);
+                let near = self.blds.iter().any(|b| b.alive && b.nation as usize == nation && b.kind.city() && b.center().dist(c) < 26.0);
                 if !near {
                     return Err("自国の城邑から遠すぎる");
                 }
@@ -856,6 +923,15 @@ impl World {
         }
     }
 
+    /// 1年あたりの秒数（戦国時代は遅くなる）
+    pub fn sec_per_year(&self) -> f32 {
+        if self.era == Era::Spring {
+            SEC_PER_YEAR
+        } else {
+            SEC_PER_YEAR * WARRING_SLOW
+        }
+    }
+
     pub fn year_bc(&self) -> i32 {
         (START_BC - self.years).ceil() as i32
     }
@@ -874,7 +950,8 @@ impl World {
     }
 
     pub fn at_war(&self, a: usize, b: usize) -> bool {
-        a != b && self.war[a][b]
+        // 略奪に来た部族の兵とはどの国も戦う
+        a != b && (a == TRIBE || b == TRIBE || self.war[a][b])
     }
 
     pub fn coalition_locked(&self, a: usize, b: usize) -> bool {
@@ -978,7 +1055,10 @@ impl World {
                 continue;
             }
             let n = &mut self.nations[u.nation as usize];
-            if u.kind.military() {
+            if u.merc_until > 0.0 {
+                // 傭兵は銭で雇われており、兵数の上限・維持費の外
+                n.mil_power += u.power * (u.hp / u.max_hp()).max(0.2);
+            } else if u.kind.military() {
                 n.soldiers += 1;
                 n.mil_power += u.power * (u.hp / u.max_hp()).max(0.2);
                 n.upkeep += 0.07 * u.power;
@@ -1009,12 +1089,22 @@ impl World {
             }
         }
         for n in self.nations.iter_mut() {
+            n.upkeep *= n.tm.upkeep;
             n.strength = n.mil_power * 10.0 + n.cities as f32 * 25.0 + n.eco_power * 4.0 + n.tiles as f32 * 0.03;
         }
     }
 
     // ------------------------------------------------------------ 命令
+    /// プレイヤーの部隊への命令を数える（指揮中の一時停止を解くため）
+    fn note_player_order(&mut self, hs: &[Handle]) {
+        let p = self.player;
+        if hs.iter().any(|&h| self.unit(h).map_or(false, |u| u.nation as usize == p)) {
+            self.player_orders = self.player_orders.wrapping_add(1);
+        }
+    }
+
     pub fn order_move(&mut self, hs: &[Handle], goal: V2, attack: bool) {
+        self.note_player_order(hs);
         let n = hs.len();
         let cols = (n as f32).sqrt().ceil() as i32;
         for (k, &h) in hs.iter().enumerate() {
@@ -1033,6 +1123,7 @@ impl World {
     }
 
     pub fn order_attack(&mut self, hs: &[Handle], t: Target) {
+        self.note_player_order(hs);
         for &h in hs {
             if let Some(u) = self.unit_mut(h) {
                 u.order = Order::Attack(t);
@@ -1043,6 +1134,7 @@ impl World {
     }
 
     pub fn order_gather(&mut self, hs: &[Handle], src: Src) {
+        self.note_player_order(hs);
         for &h in hs {
             if let Some(u) = self.unit_mut(h) {
                 if u.kind == UnitKind::Worker {
@@ -1054,6 +1146,7 @@ impl World {
     }
 
     pub fn order_build(&mut self, hs: &[Handle], b: Handle) {
+        self.note_player_order(hs);
         for &h in hs {
             if let Some(u) = self.unit_mut(h) {
                 if u.kind == UnitKind::Worker {
@@ -1112,7 +1205,7 @@ impl World {
         } else if n.workers + n.q_workers >= n.worker_cap() {
             return Err("生産ユニットが上限に達している");
         }
-        if !self.try_pay(ni, kind.cost()) {
+        if !self.try_pay(ni, self.train_cost(ni, kind)) {
             return Err("資源が足りない");
         }
         let b = self.bld_mut(bh).unwrap();
@@ -1126,12 +1219,13 @@ impl World {
         Ok(())
     }
 
-    pub fn upgrade_cost(u: &Unit) -> [f32; 3] {
+    pub fn upgrade_cost(&self, u: &Unit) -> [f32; 3] {
         let p = u.power;
+        let m = if (u.nation as usize) < NATIONS.len() { self.nations[u.nation as usize].tm.upgrade } else { 1.0 };
         if u.kind.military() {
-            [25.0 * p, 0.0, 15.0 * p]
+            [(25.0 * p * m).round(), 0.0, (15.0 * p * m).round()]
         } else {
-            [25.0 * p, 15.0 * p, 0.0]
+            [(25.0 * p * m).round(), (15.0 * p * m).round(), 0.0]
         }
     }
 
@@ -1139,6 +1233,9 @@ impl World {
     pub fn upgrade_unit(&mut self, h: Handle) -> Result<(), &'static str> {
         let cap = self.power_cap();
         let Some(u) = self.unit(h) else { return Err("") };
+        if u.merc_until > 0.0 {
+            return Err("傭兵は鍛錬できない");
+        }
         if u.power + 0.01 >= cap {
             return Err("この時代の能力上限に達している");
         }
@@ -1147,7 +1244,7 @@ impl World {
             return Err("自国領内でのみ鍛錬できる");
         }
         let ni = u.nation as usize;
-        let cost = Self::upgrade_cost(u);
+        let cost = self.upgrade_cost(u);
         if !self.try_pay(ni, cost) {
             return Err("資源が足りない");
         }
@@ -1161,6 +1258,9 @@ impl World {
     /// 兵⇔民の転換（能力は 2/3 に目減り）
     pub fn convert_unit(&mut self, h: Handle) -> Result<(), &'static str> {
         let Some(u) = self.unit(h) else { return Err("") };
+        if u.merc_until > 0.0 {
+            return Err("傭兵は民にできない");
+        }
         let ni = u.nation as usize;
         let n = &self.nations[ni];
         let to_mil = !u.kind.military();
@@ -1355,6 +1455,8 @@ impl World {
     }
 
     fn damage_bld(&mut self, bi: usize, dmg: f32, an: usize) {
+        let vn = self.blds[bi].nation as usize;
+        let dmg = if vn < NATIONS.len() { dmg * self.nations[vn].tm.def } else { dmg };
         let b = &mut self.blds[bi];
         if !b.alive {
             return;
@@ -1363,7 +1465,9 @@ impl World {
         if b.hp > 0.0 {
             return;
         }
-        if b.kind.city() && b.done() {
+        if b.kind.city() && b.done() && an == TRIBE {
+            self.plunder_city(bi);
+        } else if b.kind.city() && b.done() {
             self.capture_city(bi, an);
         } else {
             let (vn, kind) = (b.nation as usize, b.kind);
@@ -1376,6 +1480,30 @@ impl World {
 
     fn capture_city(&mut self, bi: usize, an: usize) {
         let old = self.blds[bi].nation as usize;
+        // 周の天子は春秋時代には滅びない：最後の城邑を落とされそうになると攻め手は兵を引く
+        let last = !self.blds.iter().enumerate().any(|(i, b)| i != bi && b.alive && b.nation as usize == old && b.kind.city() && b.done());
+        if last && self.immortal(old) {
+            self.blds[bi].hp = self.blds[bi].kind.max_hp() * 0.5;
+            self.nations[an].aggression += 20.0;
+            if self.war[an][old] {
+                self.war[an][old] = false;
+                self.war[old][an] = false;
+                self.truce[an][old] = self.years + 15.0;
+                self.truce[old][an] = self.years + 15.0;
+            }
+            for i in 0..self.units.len() {
+                if self.units[i].alive && self.units[i].nation as usize == an {
+                    if let Order::Attack(Target::Bld(h)) = self.units[i].order {
+                        if h.idx as usize == bi {
+                            self.units[i].order = Order::Idle;
+                        }
+                    }
+                }
+            }
+            let t = format!("{} は天子の都を前に兵を引いた（春秋時代、周は滅びない）", self.nations[an].name);
+            self.push_msg(t, [1.0, 0.9, 0.5]);
+            return;
+        }
         let was_cap = self.blds[bi].kind == BKind::Capital;
         {
             let b = &mut self.blds[bi];
@@ -1440,7 +1568,7 @@ impl World {
                 self.remove_building(i);
             }
         }
-        for o in 0..self.nations.len() {
+        for o in 0..NATIONS.len() {
             self.war[n][o] = false;
             self.war[o][n] = false;
         }
@@ -1456,7 +1584,8 @@ impl World {
     pub fn step(&mut self) {
         let dt = DT;
         self.time += dt;
-        self.years += dt / SEC_PER_YEAR;
+        let spy = self.sec_per_year();
+        self.years += dt / spy;
         if self.game_over.is_some() {
             return;
         }
@@ -1469,6 +1598,7 @@ impl World {
             self.update_stats();
         }
         self.economy(dt);
+        self.update_trade(dt);
         self.update_buildings(dt);
         self.rebuild_grid();
         for i in 0..self.units.len() {
@@ -1492,8 +1622,8 @@ impl World {
             }
         }
         self.year_tick += dt;
-        if self.year_tick >= SEC_PER_YEAR {
-            self.year_tick -= SEC_PER_YEAR;
+        if self.year_tick >= spy {
+            self.year_tick -= spy;
             self.yearly();
         }
         crate::ai::update_all(self, dt);
@@ -1505,7 +1635,7 @@ impl World {
         for b in self.blds.iter() {
             if b.alive && b.kind.city() && b.done() {
                 let n = &mut self.nations[b.nation as usize];
-                let m = n.bias * n.eco_mul * em * if b.kind == BKind::Capital { 1.3 } else { 1.0 };
+                let m = n.bias * n.eco_mul * n.tm.eco * em * if b.kind == BKind::Capital { 1.3 } else { 1.0 };
                 let add = [0.55 * m * dt, 0.25 * m * dt, 0.12 * m * dt];
                 for k in 0..3 {
                     n.res[k] += add[k];
@@ -1514,6 +1644,7 @@ impl World {
             }
         }
         // 軍の維持費（存在するだけで糧を消費）
+        let spy = self.sec_per_year();
         let mut starving = vec![false; self.nations.len()];
         for (i, n) in self.nations.iter_mut().enumerate() {
             if !n.alive {
@@ -1524,7 +1655,7 @@ impl World {
                 n.res[0] = 0.0;
                 starving[i] = true;
             }
-            n.aggression = (n.aggression - dt * 2.0 / SEC_PER_YEAR).max(0.0);
+            n.aggression = (n.aggression - dt * 2.0 / spy).max(0.0);
         }
         for u in self.units.iter_mut() {
             if u.alive && u.kind.military() && starving[u.nation as usize] {
@@ -1544,6 +1675,9 @@ impl World {
                     n.income[k] = n.income[k] * 0.5 + r * 0.5;
                     n.earned[k] = 0.0;
                 }
+                let r = n.coin_earned / self.income_t;
+                n.coin_income = n.coin_income * 0.5 + r * 0.5;
+                n.coin_earned = 0.0;
             }
             self.income_t = 0.0;
         }
@@ -1663,7 +1797,7 @@ impl World {
             let start = self.units[i].pos.tile();
             let goal = self.units[i].path_goal;
             let r = if Map::inb(goal.0, goal.1) && self.cost[Map::idx(goal.0, goal.1)].is_finite() { 0 } else { 2 };
-            let path = self.pf.find(&self.cost, start, goal, r, 40000);
+            let path = self.pf.find(&self.cost, start, goal, r, 160000);
             let u = &mut self.units[i];
             u.path = path;
             u.path_i = 0;
@@ -1863,7 +1997,7 @@ impl World {
                     self.units[i].dir = (tp - pos).norm();
                     if self.units[i].cooldown <= 0.0 {
                         self.units[i].cooldown = kind.cooldown();
-                        let atk = kind.base_atk() * self.units[i].power * self.nations[ni].mil_mul * self.rng.range(0.85, 1.15);
+                        let atk = kind.base_atk() * self.units[i].power * self.nations[ni].mil_mul * self.nations[ni].tm.atk[kind as usize] * self.rng.range(0.85, 1.15);
                         let me = self.uh(i);
                         if kind == UnitKind::Archer {
                             self.shots.push(Shot { a: pos, b: tp, t: 0.3 });
@@ -2029,7 +2163,7 @@ impl World {
                 let c = self.blds[di].center();
                 if self.nav(i, c, 1.9, dt) {
                     if self.units[i].pos.dist(c) <= 2.6 {
-                        let carry = self.units[i].carry * self.nations[ni].eco_mul;
+                        let carry = self.units[i].carry * self.nations[ni].eco_mul * self.nations[ni].tm.eco;
                         let k = self.units[i].carry_kind;
                         self.nations[ni].res[k] += carry;
                         self.nations[ni].earned[k] += carry;
@@ -2135,8 +2269,10 @@ impl World {
             }
         }
         self.run_history();
+        self.yearly_trade();
+        self.refresh_traits();
         // 終了判定
-        let alive: Vec<usize> = (0..self.nations.len()).filter(|&i| self.nations[i].alive).collect();
+        let alive: Vec<usize> = (0..NATIONS.len()).filter(|&i| self.nations[i].alive).collect();
         if alive.len() == 1 && alive[0] == self.player {
             self.game_over = Some((true, format!("{} は天下を統一した！", self.nations[self.player].name)));
         } else if yb <= END_BC {
@@ -2155,8 +2291,8 @@ impl World {
     /// 連合を結成する。announce が偽なら通知は呼び出し側に任せる
     fn start_coalition_ex(&mut self, kind: CoalKind, target: usize, announce: bool) -> bool {
         let tc = self.nations[target].home;
-        let reach = if kind == CoalKind::Hegemon { 70.0 } else { 120.0 };
-        let mut members: Vec<usize> = (0..self.nations.len())
+        let reach = if kind == CoalKind::Hegemon { 140.0 } else { 240.0 };
+        let mut members: Vec<usize> = (0..NATIONS.len())
             .filter(|&i| i != target && self.nations[i].alive && self.nations[i].home.dist(tc) <= reach)
             .collect();
         // 盟主：最も強い参加国（覇者）
@@ -2252,7 +2388,7 @@ impl World {
                 }
             }
             // 晋の戦争状態を継承
-            for o in 0..self.nations.len() {
+            for o in 0..NATIONS.len() {
                 if self.war[JIN][o] {
                     for &s in seats.iter() {
                         self.war[s][o] = true;
@@ -2373,6 +2509,21 @@ mod tests {
         }
     }
 
+    /// 秦（雍）から蜀（成都）へ、秦嶺・大巴山の古道を通って行ける
+    #[test]
+    fn qin_shu_road() {
+        let w = World::new(12345);
+        let a = w.nations[2].home.tile();
+        let b = w.nations[23].home.tile();
+        let mut pf = PathFinder::new();
+        let path = pf.find(&w.cost, a, b, 3, 200000);
+        let end = *path.last().unwrap();
+        let reach = (end.0 as i32 - b.0).abs().max((end.1 as i32 - b.1).abs());
+        println!("秦→蜀 経路長 {} 終点の距離 {}", path.len(), reach);
+        assert!(reach <= 3, "蜀に届かない");
+        assert!(path.len() < 110 * MAP_SCALE, "遠回りしている: {}", path.len());
+    }
+
     /// 全 AI で長期間シミュレーションし、国家の推移とイベントを確認する
     #[test]
     fn long_sim() {
@@ -2383,10 +2534,11 @@ mod tests {
         w.player = HAN;
         let t0 = std::time::Instant::now();
         let years = std::env::var("SIM_YEARS").ok().and_then(|s| s.parse().ok()).unwrap_or(560.0f32);
-        let steps = (years * SEC_PER_YEAR / DT) as usize;
         let mut next_report = 0.0;
         let mut seen_t = -1.0f32;
-        for _ in 0..steps {
+        let mut steps = 0usize;
+        while w.years < years + 1.0 {
+            steps += 1;
             // 観戦用：見ている国が滅んでも最後まで進める
             if w.game_over.is_some() && w.year_bc() > END_BC as i32 {
                 w.game_over = None;
@@ -2402,6 +2554,26 @@ mod tests {
                     .collect();
                 let units = w.units.iter().filter(|u| u.alive).count();
                 println!("BC{} t={:.1}s units={} alive={} :: {}", w.year_bc(), t0.elapsed().as_secs_f32(), units, alive.len(), alive.join(" "));
+                let mut coins: Vec<(f32, usize)> = (0..NATIONS.len()).filter(|&i| w.nations[i].alive).map(|i| (w.nations[i].coin_income, i)).collect();
+                coins.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+                let top: Vec<String> = coins.iter().take(6).map(|&(c, i)| format!("{}{:.2}/s({:.0})", w.nations[i].name, c, w.nations[i].coin)).collect();
+                let tr = &w.trade;
+                println!(
+                    "  [trade] 商人{}/{} 西域{}/{} 部族隊商{} 略奪団{} 傭兵{} 銭収入: {}",
+                    tr.count(|k| k == CaravanKind::Merchant),
+                    tr.target,
+                    tr.count(|k| matches!(k, CaravanKind::Western(_))),
+                    tr.target_w,
+                    tr.count(|k| matches!(k, CaravanKind::Tribe(_))),
+                    tr.bands.len(),
+                    w.units.iter().filter(|u| u.alive && u.merc_until > 0.0).count(),
+                    top.join(" ")
+                );
+                for (t, st) in tr.tribes.iter().enumerate() {
+                    if tribe_active(t, w.year_bc()) && !st.last.is_empty() {
+                        println!("    {}：{}", TRIBES[t].name, st.last);
+                    }
+                }
             }
             for m in w.msgs.iter().filter(|m| m.time > seen_t) {
                 println!("  [msg] {}", m.text);

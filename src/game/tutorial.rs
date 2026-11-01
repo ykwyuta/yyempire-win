@@ -409,7 +409,7 @@ impl Game {
         let w = self.gfx.width as f32;
         let x0 = w - PANEL_W - 10.0;
         let y0 = TOP_H + 10.0;
-        if self.show_help || self.show_diplo || self.show_chron {
+        if self.show_help || self.show_diplo || self.show_chron || self.show_market {
             // 外交・ヘルプ画面を隠さないよう小さな帯にする
             let y1 = y0 + 30.0;
             let x0 = w - 330.0;

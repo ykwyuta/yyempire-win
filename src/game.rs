@@ -1,6 +1,7 @@
 //! 画面・入力・HUD（独自実装の UI）
 
 mod chronicle;
+mod market;
 mod tutorial;
 
 use crate::art::{paint_aoe_terrain_pixel, Art, CmdIcon, ResIcon};
@@ -33,6 +34,7 @@ const VK_DELETE: u32 = 0x2E;
 const VK_F1: u32 = 0x70;
 const VK_F2: u32 = 0x71;
 const VK_F3: u32 = 0x72;
+const VK_F4: u32 = 0x73;
 const VK_F11: u32 = 0x7A;
 const VK_ADD: u32 = 0x6B;
 const VK_SUB: u32 = 0x6D;
@@ -91,6 +93,10 @@ enum Act {
     IdleWorker,
     Chron,
     ChronPage(i32),
+    Market,
+    Tax(u8),
+    Buy(usize),
+    Hire(usize),
     Tutorial,
     TutNext,
     TutQuit,
@@ -148,10 +154,15 @@ pub struct Game {
     groups: Vec<Vec<Handle>>,
     speed: u32,
     paused: bool,
+    /// 部隊を選んでから命令するまでの一時停止
+    cmd_pause: bool,
+    last_sel: Vec<Handle>,
+    last_orders: u32,
     acc: f32,
     show_diplo: bool,
     show_help: bool,
     show_chron: bool,
+    show_market: bool,
     chron_scroll: usize,
     title_sel: Option<usize>,
     notice: Option<(String, f32)>,
@@ -260,6 +271,9 @@ impl Game {
             mouse: (-100.0, -100.0),
             keys: [false; 256],
             ldown: None,
+            cmd_pause: false,
+            last_sel: Vec::new(),
+            last_orders: 0,
             mdrag: None,
             mm_drag: false,
             screen: Screen::Title,
@@ -273,6 +287,7 @@ impl Game {
             show_diplo: false,
             show_help: false,
             show_chron: false,
+            show_market: false,
             chron_scroll: 0,
             title_sel: None,
             notice: None,
@@ -578,7 +593,7 @@ impl Game {
                 return true;
             }
         }
-        if self.show_diplo || self.show_help || self.show_chron || self.world.game_over.is_some() {
+        if self.show_diplo || self.show_help || self.show_chron || self.show_market || self.world.game_over.is_some() {
             return true;
         }
         y < TOP_H || y > self.gfx.height as f32 - BOT_H
@@ -588,6 +603,34 @@ impl Game {
         if !s.is_empty() {
             self.notice = Some((s.to_string(), 3.0));
         }
+    }
+
+    // ------------------------------------------------------------ 指揮中の一時停止
+    /// 自国の部隊を新たに選ぶと時間を止め、命令を出すと再開する
+    fn update_cmd_pause(&mut self) {
+        let pl = self.world.player;
+        let own = self.sel.iter().any(|&h| self.world.unit(h).map_or(false, |u| u.nation as usize == pl));
+        if self.sel != self.last_sel {
+            // 戦死などで減っただけなら選び直しとはみなさない
+            let added = self.sel.iter().any(|h| !self.last_sel.contains(h));
+            if added {
+                self.cmd_pause = own;
+            }
+            self.last_sel = self.sel.clone();
+        }
+        if !own {
+            self.cmd_pause = false;
+        }
+        if self.world.player_orders != self.last_orders {
+            self.last_orders = self.world.player_orders;
+            self.cmd_pause = false;
+        }
+    }
+
+    /// 時間を止めているか（部隊の選択中・範囲選択のドラッグ中）
+    fn cmd_hold(&self) -> bool {
+        let dragging = self.ldown.map_or(false, |(sx, sy)| (sx - self.mouse.0).abs() > 4.0 || (sy - self.mouse.1).abs() > 4.0);
+        self.cmd_pause || dragging
     }
 
     // ------------------------------------------------------------ フレーム
@@ -615,7 +658,8 @@ impl Game {
         }
         if self.screen == Screen::Playing {
             self.scroll(dt, focused);
-            if !self.paused && self.world.game_over.is_none() && !self.show_help {
+            self.update_cmd_pause();
+            if !self.paused && !self.cmd_hold() && self.world.game_over.is_none() && !self.show_help {
                 self.acc += dt * self.speed as f32;
                 let mut steps = 0;
                 while self.acc >= DT && steps < 16 {
@@ -662,6 +706,12 @@ impl Game {
                 }
             }
             if self.screen == Screen::Title {
+                if nation.is_none() {
+                    // タイトル画面のまま国を選んでおく（YY_SEL=国番号）
+                    if let Some(s) = std::env::var("YY_SEL").ok().and_then(|v| v.parse().ok()) {
+                        self.title_sel = Some(s);
+                    }
+                }
                 if let Some(n) = nation {
                     self.title_sel = Some(n);
                     self.do_act(Act::Start);
@@ -669,7 +719,8 @@ impl Game {
                     self.zoom = z;
                     // 撮影直前にキーを押す（例：72 で史記を開く）
                     if let Some(k) = std::env::var("YY_PRESS").ok().and_then(|v| u32::from_str_radix(&v, 16).ok()) {
-                        let t = (secs - 0.6).max(self.clock + 0.3);
+                        let at = std::env::var("YY_PRESS_AT").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(secs - 0.6);
+                        let t = at.max(self.clock + 0.3);
                         self.script = vec![(t, Ev::Key(k, true)), (t + 0.05, Ev::Key(k, false))];
                     }
                     if std::env::var("YY_DEMO").is_ok() {
@@ -710,6 +761,13 @@ impl Game {
                 }
             }
             if self.clock >= secs {
+                // 撮影時のカーソル位置（YY_MOUSE="x,y"、画面ピクセル）：ツールチップの確認用
+                if let Some((mx, my)) = std::env::var("YY_MOUSE").ok().and_then(|v| {
+                    let mut it = v.split(',').filter_map(|s| s.trim().parse::<f32>().ok());
+                    Some((it.next()?, it.next()?))
+                }) {
+                    self.mouse = (mx / self.gfx.ui, my / self.gfx.ui);
+                }
                 self.update_dirty_terrain();
                 self.update_overlay();
                 self.render_nopresent(dt);
@@ -781,7 +839,7 @@ impl Game {
             Ev::Wheel(d) => {
                 if self.screen == Screen::Playing && !self.over_ui(self.mouse.0, self.mouse.1) {
                     let before = self.screen_to_world(self.mouse.0, self.mouse.1);
-                    self.zoom = (self.zoom * 1.15f32.powf(d)).clamp(3.0, 64.0);
+                    self.zoom = (self.zoom * 1.15f32.powf(d)).clamp(1.2, 64.0);
                     let after = self.screen_to_world(self.mouse.0, self.mouse.1);
                     self.cam = self.cam + (before - after);
                     self.clamp_cam();
@@ -800,7 +858,7 @@ impl Game {
                             return false;
                         }
                         let (mx0, my0, mx1, my1) = self.mm_rect();
-                        if x >= mx0 && x <= mx1 && y >= my0 && y <= my1 && !self.show_diplo && !self.show_help && !self.show_chron {
+                        if x >= mx0 && x <= mx1 && y >= my0 && y <= my1 && !self.show_diplo && !self.show_help && !self.show_chron && !self.show_market {
                             self.mm_drag = true;
                             self.minimap_jump(x, y);
                             return false;
@@ -931,10 +989,11 @@ impl Game {
             VK_ESCAPE => {
                 if self.mode != Mode::Normal {
                     self.mode = Mode::Normal;
-                } else if self.show_diplo || self.show_help || self.show_chron {
+                } else if self.show_diplo || self.show_help || self.show_chron || self.show_market {
                     self.show_diplo = false;
                     self.show_help = false;
                     self.show_chron = false;
+                    self.show_market = false;
                 } else {
                     self.clear_sel();
                 }
@@ -943,6 +1002,7 @@ impl Game {
             VK_F1 => self.show_help = !self.show_help,
             VK_F2 => self.show_diplo = !self.show_diplo,
             VK_F3 => self.do_act(Act::Chron),
+            VK_F4 => self.do_act(Act::Market),
             VK_HOME => self.do_act(Act::Home),
             VK_ADD | VK_OEM_PLUS => self.speed = (self.speed * 2).min(8),
             VK_SUB | VK_OEM_MINUS => self.speed = (self.speed / 2).max(1),
@@ -1442,7 +1502,7 @@ impl Game {
                 continue;
             }
             let d = n.home.dist(p);
-            if d < 6.0 && best.map_or(true, |b| d < b.0) {
+            if d < 10.0 && best.map_or(true, |b| d < b.0) {
                 best = Some((d, i));
             }
         }
@@ -1461,6 +1521,10 @@ impl Game {
     }
 
     fn do_act(&mut self, a: Act) {
+        // 部隊への指示（移動・攻撃以外）でも時間を再開する
+        if matches!(a, Act::Upgrade | Act::Convert | Act::Stop | Act::WorkersAuto | Act::ArmyDefend | Act::Demolish) {
+            self.cmd_pause = false;
+        }
         let pl = self.world.player;
         match a {
             Act::Noop => {}
@@ -1500,6 +1564,7 @@ impl Game {
                 self.show_diplo = false;
                 self.show_help = false;
                 self.show_chron = false;
+                self.show_market = false;
                 self.paused = false;
                 self.speed = 1;
                 self.fit_title_camera();
@@ -1647,18 +1712,39 @@ impl Game {
                 self.show_diplo = !self.show_diplo;
                 self.show_help = false;
                 self.show_chron = false;
+                self.show_market = false;
             }
             Act::Help => {
                 self.show_help = !self.show_help;
                 self.show_diplo = false;
                 self.show_chron = false;
+                self.show_market = false;
             }
             Act::Chron => {
                 self.show_chron = !self.show_chron;
                 self.chron_scroll = 0;
                 self.show_diplo = false;
                 self.show_help = false;
+                self.show_market = false;
             }
+            Act::Market => {
+                self.show_market = !self.show_market;
+                self.show_diplo = false;
+                self.show_help = false;
+                self.show_chron = false;
+            }
+            Act::Tax(t) => {
+                self.world.nations[pl].tax = t;
+                self.notice(&format!("税率を{}にした", TAX_NAMES[t as usize]));
+            }
+            Act::Buy(k) => match self.world.buy_resource(pl, k) {
+                Ok(()) => self.notice(&format!("市場で{}を{}買った", RES_NAMES[k], MARKET_LOT as i32)),
+                Err(e) => self.notice(e),
+            },
+            Act::Hire(t) => match self.world.hire_mercs(pl, t) {
+                Ok(()) => self.notice(&format!("{}の傭兵を雇った", TRIBES[t].name)),
+                Err(e) => self.notice(e),
+            },
             Act::ChronPage(d) => {
                 self.chron_scroll = (self.chron_scroll as i32 + d).max(0) as usize;
             }
@@ -1666,6 +1752,7 @@ impl Game {
                 self.show_diplo = false;
                 self.show_help = false;
                 self.show_chron = false;
+                self.show_market = false;
             }
             Act::War(o) => {
                 if self.world.truce[pl][o] > self.world.years {
@@ -1753,10 +1840,14 @@ impl Game {
                 if self.show_chron {
                     self.render_chron();
                 }
+                if self.show_market {
+                    self.render_market();
+                }
                 if self.world.game_over.is_some() {
                     self.render_gameover();
                 }
                 self.render_tutorial();
+                self.render_tooltip();
             }
             self.gfx.d2d_end();
         }
@@ -1838,6 +1929,13 @@ impl Game {
                 }
             }
         }
+        // 隊商（商人・西域の商人・部族）
+        for c in wd.trade.caravans.iter() {
+            if !inview(c.pos) || fog_at(c.pos) != 2 {
+                continue;
+            }
+            crate::game::market::draw_caravan(g, c, px);
+        }
         // ユニット
         let era = wd.era;
         for u in wd.units.iter() {
@@ -1845,7 +1943,8 @@ impl Game {
                 continue;
             }
             let nc = wd.nations[u.nation as usize].color;
-            crate::art::draw_world_unit(g, u, nc, era, &RES_COLORS, px);
+            let ue = if (u.tribe as usize) < TRIBES.len() && TRIBES[u.tribe as usize].nomad { Era::Warring } else { era };
+            crate::art::draw_world_unit(g, u, nc, ue, &RES_COLORS, px);
         }
         // 矢
         for s in wd.shots.iter() {
@@ -1917,6 +2016,7 @@ impl Game {
                 sx: f32,
                 sy: f32,
                 kind: UnitKind,
+                ue: Era,
                 pw: f32,
                 nc: [f32; 3],
                 carry: Option<usize>,
@@ -2070,6 +2170,7 @@ impl Game {
                             sx,
                             sy,
                             kind: u.kind,
+                            ue: if (u.tribe as usize) < TRIBES.len() && TRIBES[u.tribe as usize].nomad { Era::Warring } else { self.world.era },
                             pw: u.power,
                             nc,
                             carry,
@@ -2129,10 +2230,10 @@ impl Game {
                             self.gfx.fill_round(sx - bw * 0.5, by, sx - bw * 0.5 + bw * f, by + 3.5, 1.5, [1.0 - f, 0.22 + 0.75 * f, 0.15, 0.95]);
                         }
                     }
-                    WorldItem::Unit { sx, sy, kind, pw, nc, carry, flip_x, hp_frac } => {
+                    WorldItem::Unit { sx, sy, kind, ue, pw, nc, carry, flip_x, hp_frac } => {
                         let scale = if kind == UnitKind::Chariot { 0.76 } else { 0.62 };
                         let r = (z * scale * (1.0 + 0.04 * (pw - 1.0).min(4.0))).clamp(7.5, 22.0);
-                        if let Some(bmp) = self.art.unit_sprite(kind, era, flip_x) {
+                        if let Some(bmp) = self.art.unit_sprite(kind, ue, flip_x) {
                             self.gfx.draw_bitmap(bmp, sx - r, sy - r * 1.35, sx + r, sy + r * 0.65);
                         }
                         // 足元右下の国色小紋章
@@ -2323,7 +2424,7 @@ impl Game {
             let p = self.screen_to_world(self.mouse.0, self.mouse.1);
             let mut best: Option<(f32, usize)> = None;
             for (i, n) in self.world.nations.iter().enumerate() {
-                if n.alive && n.home.dist(p) < 6.0 && best.map_or(true, |b| n.home.dist(p) < b.0) {
+                if n.alive && n.home.dist(p) < 10.0 && best.map_or(true, |b| n.home.dist(p) < b.0) {
                     best = Some((n.home.dist(p), i));
                 }
             }
@@ -2387,6 +2488,29 @@ impl Game {
                 "難易度：難"
             };
             self.gfx.text(diff, px + 32.0, 470.0, 316.0, 20.0, Font::Normal, [0.88, 0.84, 0.76, 1.0]);
+            // 史実に基づく国の特徴（説明はツールチップ）
+            let trs: Vec<&Trait> = all_traits_of(i).collect();
+            if !trs.is_empty() {
+                let names: Vec<String> = trs
+                    .iter()
+                    .map(|t| if t.from_bc < START_BC as i32 { format!("{}（前{}年〜）", t.name, t.from_bc) } else if t.to_bc > END_BC as i32 { format!("{}（〜前{}年）", t.name, t.to_bc) } else { t.name.to_string() })
+                    .collect();
+                let s = format!("特徴：{}", names.join("・"));
+                self.gfx.text(&s, px + 32.0, 492.0, 316.0, 22.0, Font::Normal, [0.70, 0.92, 1.0, 1.0]);
+                let tip: Vec<String> = trs.iter().map(|t| format!("【{}】{}", t.name, t.desc)).collect();
+                self.buttons.push(Button {
+                    x0: px + 32.0,
+                    y0: 490.0,
+                    x1: w - 30.0,
+                    y1: 514.0,
+                    label: String::new(),
+                    sub: String::new(),
+                    key: 0,
+                    enabled: true,
+                    act: Act::Noop,
+                    tip: tip.join("\n"),
+                });
+            }
             self.add_button(px + 50.0, 530.0, w - 50.0, 576.0, "この国で覇業を開始", "", 0, true, Act::Start, "");
         }
         let ty = (h - 128.0).max(592.0);
@@ -2481,16 +2605,47 @@ impl Game {
         }
         let s = format!("-{:.1}/秒", upkeep);
         self.gfx.text_shadow(&s, x + 28.0, 8.0, 88.0, 22.0, Font::Normal, [0.98, 0.68, 0.52, 1.0]);
+        x += 112.0;
+        // 銭（商人からの税収）
+        let (coin, coin_inc) = (self.world.nations[pl].coin, self.world.nations[pl].coin_income);
+        self.gfx.fill_circle(x + 13.0, 18.0, 11.0, [0.86, 0.70, 0.30, 1.0]);
+        self.gfx.stroke_circle(x + 13.0, 18.0, 11.0, 1.2, [0.45, 0.32, 0.12, 1.0]);
+        self.gfx.fill_rect(x + 9.0, 14.0, x + 17.0, 22.0, [0.30, 0.22, 0.10, 1.0]);
+        let s = format!("{}", coin as i32);
+        self.gfx.text_shadow(&s, x + 28.0, 7.0, 64.0, 22.0, Font::Big, [1.0, 0.86, 0.45, 1.0]);
+        let s = format!("{:+.1}/秒", coin_inc);
+        self.gfx.text(&s, x + 80.0, 11.0, 56.0, 18.0, Font::Small, [0.80, 0.78, 0.70, 1.0]);
+        self.buttons.push(Button {
+            x0: x,
+            y0: 4.0,
+            x1: x + 136.0,
+            y1: 32.0,
+            label: String::new(),
+            sub: String::new(),
+            key: 0,
+            enabled: true,
+            act: Act::Market,
+            tip: "銭：領内を通る商人・西域の商人・部族の隊商からの税収。交易画面（F4）で資源の購入や傭兵の雇用に使う".to_string(),
+        });
 
-        let era = if self.world.era == Era::Spring { "春秋時代" } else { "戦国時代" };
-        let s = format!("紀元前 {}年　{}", self.world.year_bc(), era);
         // 速度・メニュー
-        let bx = w - 344.0;
-        let ex = (bx - 248.0).max(x + 118.0);
+        let bx = w - 424.0;
+        let ex = (bx - 248.0).max(x + 166.0);
+        // 幅が足りなければ短く書く
+        let s = if bx - ex >= 240.0 {
+            let era = if self.world.era == Era::Spring { "春秋時代" } else { "戦国時代" };
+            format!("紀元前 {}年　{}", self.world.year_bc(), era)
+        } else if bx - ex >= 170.0 {
+            let era = if self.world.era == Era::Spring { "春秋" } else { "戦国" };
+            format!("前{}年 {}", self.world.year_bc(), era)
+        } else {
+            format!("前{}年", self.world.year_bc())
+        };
         if let Some(ic) = &self.art.res_icons[ResIcon::Era as usize] {
             self.gfx.draw_bitmap(ic, ex - 26.0, 6.0, ex - 2.0, 30.0);
         }
-        self.gfx.text_shadow(&s, ex, 7.0, 240.0, 24.0, Font::Big, [1.0, 0.9, 0.6, 1.0]);
+        let ef = if bx - ex >= 170.0 { Font::Big } else { Font::Normal };
+        self.gfx.text_shadow(&s, ex, if bx - ex >= 170.0 { 7.0 } else { 9.0 }, (bx - ex - 4.0).max(60.0), 24.0, ef, [1.0, 0.9, 0.6, 1.0]);
         let paused = self.paused;
         let sp = self.speed;
         self.add_button(bx, 5.0, bx + 36.0, 31.0, if paused { "▶" } else { "❚❚" }, "", 0, true, Act::Speed(0), "");
@@ -2502,10 +2657,13 @@ impl Game {
                 self.gfx.stroke_round(x0, 5.0, x0 + 33.0, 31.0, 3.0, 2.0, [1.0, 0.9, 0.4, 1.0]);
             }
         }
+        self.add_button(w - 242.0, 5.0, w - 166.0, 31.0, "交易 F4", "", 0, true, Act::Market, "商人の税・市場・山岳民と遊牧民・傭兵・西域");
         self.add_button(w - 162.0, 5.0, w - 84.0, 31.0, "外交 F2", "", 0, true, Act::Diplo, "");
         self.add_button(w - 80.0, 5.0, w - 4.0, 31.0, "ヘルプ F1", "", 0, true, Act::Help, "");
         if paused {
             self.gfx.text_shadow("一時停止中（Space）", w / 2.0 - 120.0, TOP_H + 60.0, 240.0, 30.0, Font::BigCenter, [1.0, 1.0, 0.8, 1.0]);
+        } else if self.cmd_hold() {
+            self.gfx.text_shadow("指揮中（時は止まっている。命令を出すか選択を解くと進む）", w / 2.0 - 320.0, TOP_H + 60.0, 640.0, 30.0, Font::BigCenter, [0.8, 0.95, 1.0, 1.0]);
         }
 
         // ---- 連合情報
@@ -2587,6 +2745,17 @@ impl Game {
             .filter(|u| u.alive && u.kind.military() && (u.nation as usize == pl || self.seen(u.pos)))
             .map(|u| (mx0 + u.pos.x * sxs, my0 + u.pos.y * sys, self.world.nations[u.nation as usize].color, u.nation as usize == pl))
             .collect();
+        let cdots: Vec<(f32, f32, [f32; 4])> = self
+            .world
+            .trade
+            .caravans
+            .iter()
+            .filter(|c| self.seen(c.pos))
+            .map(|c| (mx0 + c.pos.x * sxs, my0 + c.pos.y * sys, crate::game::market::caravan_color(c.kind)))
+            .collect();
+        for (x, y, c) in cdots {
+            self.gfx.fill_rect(x - 1.0, y - 1.0, x + 1.0, y + 1.0, c);
+        }
         for (x, y, c, mine) in dots {
             let s = if mine { 1.6 } else { 1.0 };
             self.gfx.fill_rect(x - s, y - s, x + s, y + s, if mine { [1.0, 1.0, 1.0, 1.0] } else { c4(darker(c, 0.6), 1.0) });
@@ -2615,7 +2784,7 @@ impl Game {
         let cx0 = w - 388.0;
         self.art.draw_inset_box(&self.gfx, cx0, py + 6.0, w - 4.0, h - 4.0);
         self.art.draw_corner_ornaments(&self.gfx, cx0 + 2.0, py + 8.0, w - 6.0, h - 6.0, 11.0);
-        if !self.show_diplo && !self.show_help && !self.show_chron {
+        if !self.show_diplo && !self.show_help && !self.show_chron && !self.show_market {
             self.render_commands(w - 382.0, py + 12.0);
         }
 
@@ -2624,15 +2793,21 @@ impl Game {
             let t = t.clone();
             self.gfx.text_shadow(&t, w / 2.0 - 300.0, py - 34.0, 600.0, 26.0, Font::BigCenter, [1.0, 0.85, 0.5, a]);
         }
-        // ボタンのツールチップ
+    }
+
+    /// ボタンのツールチップ（すべての画面部品の上に描く。上端で切れるならカーソルの下へ）
+    fn render_tooltip(&mut self) {
+        let (w, h) = (self.gfx.width as f32, self.gfx.height as f32);
         let (mx, my) = self.mouse;
-        let tip = self.buttons.iter().find(|b| mx >= b.x0 && mx <= b.x1 && my >= b.y0 && my <= b.y1 && !b.tip.is_empty()).map(|b| b.tip.clone());
-        if let Some(t) = tip {
-            let tw = 310.0;
-            let x0 = (mx - tw).max(4.0);
-            self.art.draw_inset_box(&self.gfx, x0, my - 72.0, x0 + tw, my - 8.0);
-            self.gfx.text(&t, x0 + 8.0, my - 68.0, tw - 16.0, 56.0, Font::Small, [0.95, 0.92, 0.85, 1.0]);
-        }
+        // 後から置いたボタン（上に重なる画面）を優先
+        let tip = self.buttons.iter().rev().find(|b| mx >= b.x0 && mx <= b.x1 && my >= b.y0 && my <= b.y1 && !b.tip.is_empty()).map(|b| b.tip.clone());
+        let Some(t) = tip else { return };
+        let tw = 340.0f32.min(w - 8.0);
+        let th = self.gfx.measure_h(&t, Font::Small, tw - 16.0) + 14.0;
+        let x0 = (mx - tw * 0.5).clamp(4.0, (w - tw - 4.0).max(4.0));
+        let y0 = if my - th - 10.0 >= 2.0 { my - th - 10.0 } else { (my + 24.0).min(h - th - 2.0) };
+        self.art.draw_inset_box(&self.gfx, x0, y0, x0 + tw, y0 + th);
+        self.gfx.text(&t, x0 + 8.0, y0 + 6.0, tw - 16.0, th - 8.0, Font::Small, [0.95, 0.92, 0.85, 1.0]);
     }
 
     fn order_text(&self, u: &Unit) -> &'static str {
@@ -2678,7 +2853,17 @@ impl Game {
 
             let tx = x + 102.0;
             let tw = (wd - 102.0).max(100.0);
-            let title = format!("{}　【{}】", u.kind.name(era), n.name);
+            let title = if (u.tribe as usize) < TRIBES.len() {
+                let td = &TRIBES[u.tribe as usize];
+                let ue = if td.nomad { Era::Warring } else { era };
+                if u.merc_until > 0.0 {
+                    format!("{}の傭兵（{}）【{}】残り{}年", td.name, u.kind.name(ue), n.name, (u.merc_until - self.world.years).ceil() as i32)
+                } else {
+                    format!("{}の{}", td.name, u.kind.name(ue))
+                }
+            } else {
+                format!("{}　【{}】", u.kind.name(era), n.name)
+            };
             let lines = format!(
                 "兵力 {:.0}/{:.0}　　能力 {:.1}（時代上限 {:.1}）\n状態：{}{}",
                 u.hp.max(0.0),
@@ -2807,7 +2992,7 @@ impl Game {
             let tx = x + 84.0;
             let tw = (wd - 84.0).max(100.0);
             let title = format!("{} の国勢（右のボタンで民全体・全軍へ命令可）", n.name);
-            let wars: Vec<&str> = (0..self.world.nations.len()).filter(|&o| self.world.at_war(pl, o)).map(|o| self.world.nations[o].name).collect();
+            let wars: Vec<&str> = (0..NATIONS.len()).filter(|&o| self.world.at_war(pl, o)).map(|o| self.world.nations[o].name).collect();
             let s = format!(
                 "城邑 {}　領土 {}　国力 {:.0}　生産 ×{:.2}　時代 ×{:.2}　上限 {:.1}\n交戦中：{}",
                 n.cities,
@@ -2895,7 +3080,7 @@ impl Game {
             // 鍛錬
             let u0 = self.world.unit(own[0]).unwrap();
             let u0_kind = u0.kind;
-            let up_cost = World::upgrade_cost(u0);
+            let up_cost = self.world.upgrade_cost(u0);
             let label = if any_mil && !any_worker { "訓練" } else if any_worker && !any_mil { "教化" } else { "鍛錬" };
             let (x0, y0, x1, y1) = pos(i);
             self.add_button(x0, y0, x1, y1, label, &Self::cost_str(up_cost), 'T' as u32, true, Act::Upgrade, "選択部隊の能力を +0.5 高める（自国領内のみ）。兵は戦闘力と兵力、民は採集量が上がる。費用は現在の能力に比例。");
@@ -2974,7 +3159,7 @@ impl Game {
                 };
                 for (k, key, tip) in list {
                     let (x0, y0, x1, y1) = pos(i);
-                    let c = k.cost();
+                    let c = self.world.train_cost(pl, k);
                     let tip = format!("{}\n訓練時間 {:.0}秒　維持費 {}", tip, k.train_time(), if k.military() { "糧0.07/秒×能力" } else { "なし" });
                     self.add_button(x0, y0, x1, y1, k.name(era), &Self::cost_str(c), key as u32, afford(c), Act::Train(k), &tip);
                     i += 1;
@@ -3030,7 +3215,7 @@ impl Game {
         self.add_button(x0 + pw - 196.0, y0 + 10.0, x0 + pw - 98.0, y0 + 40.0, "史記 F3", "", 0, true, Act::Chron, "英雄・諸子百家・政治指導者、反乱・簒奪の記録と各国の君主家");
         self.art.draw_inset_box(&self.gfx, x0 + 10.0, y0 + 48.0, x0 + pw - 10.0, y0 + ph - 10.0);
         let home = self.world.nations[pl].home;
-        let mut list: Vec<usize> = (0..self.world.nations.len()).filter(|&i| i != pl && self.world.nations[i].alive).collect();
+        let mut list: Vec<usize> = (0..NATIONS.len()).filter(|&i| i != pl && self.world.nations[i].alive).collect();
         list.sort_by(|&a, &b| self.world.nations[a].home.dist(home).partial_cmp(&self.world.nations[b].home.dist(home)).unwrap());
         let cols = 2;
         let colw = (pw - 30.0) / cols as f32;
@@ -3084,8 +3269,8 @@ impl Game {
 
     fn render_help(&mut self) {
         let (w, h) = (self.gfx.width as f32, self.gfx.height as f32);
-        let pw = 880.0f32.min(w - 20.0);
-        let ph = 640.0f32.min(h - 40.0);
+        let pw = 1180.0f32.min(w - 20.0);
+        let ph = (h - 20.0).max(300.0);
         let x0 = (w - pw) / 2.0;
         let y0 = (h - ph) / 2.0;
         self.gfx.fill_rect(0.0, 0.0, w, h, [0.0, 0.0, 0.0, 0.45]);
@@ -3098,7 +3283,7 @@ impl Game {
         self.add_button(x0 + pw - 90.0, y0 + 10.0, x0 + pw - 14.0, y0 + 40.0, "閉じる", "", 0, true, Act::CloseOverlay, "");
         self.art.draw_inset_box(&self.gfx, x0 + 14.0, y0 + 46.0, x0 + pw - 14.0, y0 + ph - 14.0);
         let text = "\
-■ 目的　紀元前221年まで生き残り、最も強い国となるか、天下を統一せよ。時間は全ての国で共通に流れ（1年＝4秒）、春秋時代（〜前453年）から戦国時代へ移る。どの国も同じ時代補正を受け、一部の国だけ文明が進むことはない。
+■ 目的　紀元前221年まで生き残り、最も強い国となるか、天下を統一せよ。時間は全ての国で共通に流れ（春秋は1年＝4秒、戦国は時間がゆっくり流れ1年＝8秒）、春秋時代（〜前453年）から戦国時代へ移る。どの国も同じ時代補正を受け、一部の国だけ文明が進むことはない。
 
 ■ 資源　糧（田を耕す）・木（森を伐採）・銅（銅山を採掘）。民が集めて都・邑へ運ぶ。城邑からも少しずつ税収がある。
 
@@ -3111,6 +3296,10 @@ impl Game {
 ■ 合従軍（戦国）　突出して強い国が現れると、周辺国が合従して15年間一斉に攻撃する。
 ■ 三家分晋　戦国時代の到来とともに晋は韓・趙・魏に分かれる。
 ■ 史実の出来事　史実の年になると、英雄・諸子百家・政治指導者が現れて国を強くし（一定年数、生産や武が上がる）、反乱や簒奪で兵や蓄えを失い君主家（国姓）が変わる。その国が滅んでいれば起こらない。記録と各国の君主家・人物は「史記」（F3、外交画面から）で見られる。
+■ 国の特徴　国ごとに史実に基づく特徴がある（タイトル画面と史記で確認できる）。周は春秋時代には滅びない（最後の城邑を落とされても攻め手は兵を引く）。秦は関中の険で城が堅く、趙は胡服騎射（前307年〜）で騎兵が強く、韓は強弩、魏は武卒、斉・宋・鄭は商人が集まる、など。
+■ 交易（F4）　国に属さない商人が諸国を巡り、生産力の高い国ほど多く集まる。商人は領内を通るだけで税（銭）を納め、中原全体の生産量に比例して数が増える。税率は軽いほど商人が集まる。銭は市場で糧・木・銅に換えられる。西域の商人は河西回廊・草原の道・蜀身毒道の先の地域（関中・河東・洛邑、北辺、蜀・巴）にだけ来て、多くの税を落とす。
+■ 山岳民・遊牧民　犬戎・山戎・林胡・東胡・匈奴・百越などは国ではない。時代に合わせて現れ、守りの薄い国へ略奪に来たり（城邑を落とすと蓄えを奪って引き上げる）、馬や毛皮を商いに来たりする。交易画面から銭で傭兵に雇え、雇った部族はその間その国を襲わない。
+■ 指揮中は時が止まる　自国の部隊を選ぶと時間が止まり、移動・攻撃・採集・建設などの命令を出すと（または選択を解くと）再び進む。範囲選択のドラッグ中も止まる。
 ■ 戦場の霧　自国の民・兵・建物の周囲しか見えない。一度見た土地は暗く残り、地形と城は見えるが敵兵は見えない。諸侯の都の所在だけは初めから分かっている。
 
 ■ 操作
@@ -3120,7 +3309,9 @@ impl Game {
 　Ctrl+数字：部隊登録　数字：部隊呼び出し　.：待機中の民　Home：国都へ
 　ホイール：拡大縮小　中ボタンドラッグ・矢印キー・画面端：スクロール　ミニマップクリック：移動
 　Space：一時停止　＋／－：速度　Esc：取り消し　F11：全画面　Ctrl＋＋／Ctrl＋−：文字の大きさ";
-        self.gfx.text(text, x0 + 24.0, y0 + 52.0, pw - 48.0, ph - 64.0, Font::Normal, [0.92, 0.9, 0.84, 1.0]);
+        // 入りきらなければ小さい字にする
+        let f = if self.gfx.measure_h(text, Font::Normal, pw - 48.0) > ph - 64.0 { Font::Small } else { Font::Normal };
+        self.gfx.text(text, x0 + 24.0, y0 + 52.0, pw - 48.0, ph - 64.0, f, [0.92, 0.9, 0.84, 1.0]);
     }
 
     fn render_gameover(&mut self) {
