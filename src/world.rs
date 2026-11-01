@@ -487,6 +487,8 @@ pub struct World {
     pub player_orders: u32,
     /// 上帝降臨（前221年までに天下が定まらなかった）
     pub descent: Option<Descent>,
+    /// 撮影用：プレイヤーの国も AI が動かす
+    pub ai_player: bool,
     pub time: f32,
     pub ai: Vec<AiState>,
     /// 商人・西域の商人・山岳民と遊牧民
@@ -541,6 +543,7 @@ impl World {
             protect_player: false,
             player_orders: 0,
             descent: None,
+            ai_player: false,
             time: 0.0,
             ai: Vec::new(),
             trade: Trade::new(&mut Rng::new(seed as u64 * 13 + 5)),

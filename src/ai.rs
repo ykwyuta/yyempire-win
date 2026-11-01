@@ -25,7 +25,7 @@ impl AiState {
 pub fn update_all(w: &mut World, dt: f32) {
     let mut ais = std::mem::take(&mut w.ai);
     for n in 0..ais.len() {
-        if n == w.player || !w.nations[n].alive {
+        if (n == w.player && !w.ai_player) || !w.nations[n].alive {
             continue;
         }
         let a = &mut ais[n];

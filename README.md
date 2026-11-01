@@ -3,6 +3,10 @@
 Rust + Direct3D11 / Direct2D / DirectWrite で作った、Age of Empires 風のリアルタイムストラテジーです。
 UI フレームワークやゲームエンジンは使わず、`windows` クレート（Win32 API バインディング）だけで描画・入力・UI を自作しています。
 
+**ドキュメント**：紹介とユーザーガイド（[日本語](docs/ja/introduction.md)・[English](docs/en/introduction.md)・[中文](docs/zh/introduction.md)）。一覧は [docs/](docs/README.md)。
+
+![プレイ画面](docs/images/play.jpg)
+
 ## 実行
 
 ```

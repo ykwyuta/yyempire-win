@@ -715,6 +715,8 @@ impl Game {
                 if let Some(n) = nation {
                     self.title_sel = Some(n);
                     self.do_act(Act::Start);
+                    // 撮影用：自国も AI に任せる（YY_AIPLAY=1）
+                    self.world.ai_player = std::env::var("YY_AIPLAY").is_ok();
                     // 撮影用：指定の年（紀元前）から始める（YY_YEAR=222 など）
                     if let Some(y) = std::env::var("YY_YEAR").ok().and_then(|v| v.parse::<f32>().ok()) {
                         self.world.years = START_BC - y;
@@ -2527,9 +2529,12 @@ impl Game {
         let (mx, my) = self.mouse;
         let tip = self.buttons.iter().find(|b| mx >= b.x0 && mx <= b.x1 && my >= b.y0 && my <= b.y1 && !b.tip.is_empty()).map(|b| b.tip.clone());
         if let Some(t) = tip {
+            // 説明の行数に合わせて上へ伸ばす
             let x0 = px + 24.0;
-            self.art.draw_inset_box(&self.gfx, x0, ty - 104.0, w - 24.0, ty - 64.0);
-            self.gfx.text(&t, x0 + 8.0, ty - 100.0, w - x0 - 40.0, 36.0, Font::Small, [0.95, 0.92, 0.85, 1.0]);
+            let th = self.gfx.measure_h(&t, Font::Small, w - x0 - 40.0) + 10.0;
+            let y1 = ty - 64.0;
+            self.art.draw_inset_box(&self.gfx, x0, y1 - th - 4.0, w - 24.0, y1);
+            self.gfx.text(&t, x0 + 8.0, y1 - th, w - x0 - 40.0, th, Font::Small, [0.95, 0.92, 0.85, 1.0]);
         }
     }
 
@@ -3075,7 +3080,7 @@ impl Game {
                 for (k, key, tip) in [
                     (BKind::Farm, 'Q', "田：民が耕すと糧を産む。自国領内に建設。"),
                     (BKind::Barracks, 'W', "兵営：軍事ユニットを訓練する。自国領内に建設。"),
-                    (BKind::Town, 'E', "邑：領土を広げ人口上限を上げる。他の城邑から9以上離し、自国城邑から22以内。"),
+                    (BKind::Town, 'E', "邑：領土を広げ人口上限を上げる。他の城邑から9以上離し、自国城邑から26以内。"),
                 ] {
                     let (x0, y0, x1, y1) = pos(i);
                     let c = k.cost();
