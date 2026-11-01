@@ -52,6 +52,10 @@ cargo run --release
 | `src/game/chronicle.rs` | 史記画面（出来事の記録、各国の君主家と人物） |
 | `src/game/market.rs` | 交易画面（税率・市場・西域の道・部族と傭兵）と隊商の描画 |
 
+## CI
+
+GitHub Actions（`.github/workflows/build.yml`）が push・プルリクエストのたびに Windows でリリースビルドとテストを行い、`yyempire.exe` を成果物（yyempire-windows）として保存する。Actions 画面の「Run workflow」から手動でも実行できる。
+
 ## テスト
 
 全国 AI で 549 年間をヘッドレスで回すシミュレーション：
