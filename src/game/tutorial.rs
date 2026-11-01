@@ -409,12 +409,11 @@ impl Game {
         let w = self.gfx.width as f32;
         let x0 = w - PANEL_W - 10.0;
         let y0 = TOP_H + 10.0;
-        if self.show_help || self.show_diplo {
+        if self.show_help || self.show_diplo || self.show_chron {
             // 外交・ヘルプ画面を隠さないよう小さな帯にする
             let y1 = y0 + 30.0;
             let x0 = w - 330.0;
-            self.gfx.fill_round(x0, y0, w - 10.0, y1, 6.0, [0.09, 0.07, 0.05, 0.96]);
-            self.gfx.stroke_round(x0, y0, w - 10.0, y1, 6.0, 2.0, [0.85, 0.68, 0.35, 1.0]);
+            self.art.draw_stone_panel(&self.gfx, x0, y0, w - 10.0, y1);
             let s = if done { "✓ できました！".to_string() } else { format!("チュートリアル {}/{}：この画面を閉じると続きます", step + 1, STEPS.len()) };
             let c = if done { [0.5, 1.0, 0.5, 1.0] } else { [0.95, 0.88, 0.6, 1.0] };
             self.gfx.text(&s, x0 + 12.0, y0 + 5.0, 310.0, 22.0, Font::Small, c);
@@ -426,8 +425,9 @@ impl Game {
         let tw = PANEL_W - 36.0;
         let body_h = self.gfx.measure_h(st.body, Font::Normal, tw);
         let y1 = y0 + 92.0 + body_h + 56.0;
-        self.gfx.fill_round(x0, y0, x0 + PANEL_W, y1, 8.0, [0.09, 0.07, 0.05, 0.96]);
-        self.gfx.stroke_round(x0, y0, x0 + PANEL_W, y1, 8.0, 2.0, [0.85, 0.68, 0.35, 1.0]);
+        self.art.draw_stone_panel(&self.gfx, x0, y0, x0 + PANEL_W, y1);
+        self.art.draw_inset_box(&self.gfx, x0 + 10.0, y0 + 78.0, x0 + PANEL_W - 10.0, y1 - 52.0);
+        self.art.draw_corner_ornaments(&self.gfx, x0 + 3.0, y0 + 3.0, x0 + PANEL_W - 3.0, y1 - 3.0, 14.0);
         let hdr = format!("チュートリアル　{} / {}", step + 1, STEPS.len());
         self.gfx.text(&hdr, x0 + 18.0, y0 + 10.0, tw, 20.0, Font::Small, [0.75, 0.7, 0.6, 1.0]);
         // 進み具合

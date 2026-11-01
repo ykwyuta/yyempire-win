@@ -6,6 +6,9 @@ use crate::path::PathFinder;
 use crate::rng::Rng;
 use std::collections::VecDeque;
 
+mod history;
+pub use history::{Chron, HKind, Person, HISTORY, INITIAL_HOUSE};
+
 #[derive(Clone, Copy, Default, Debug, PartialEq)]
 pub struct V2 {
     pub x: f32,
@@ -96,20 +99,6 @@ impl UnitKind {
                     "戦車"
                 } else {
                     "騎兵"
-                }
-            }
-        }
-    }
-    pub fn glyph(self, era: Era) -> &'static str {
-        match self {
-            UnitKind::Worker => "民",
-            UnitKind::Infantry => "戈",
-            UnitKind::Archer => "弩",
-            UnitKind::Chariot => {
-                if era == Era::Spring {
-                    "車"
-                } else {
-                    "騎"
                 }
             }
         }
@@ -381,6 +370,13 @@ pub struct Nation {
     pub earned: [f32; 3],
     pub income: [f32; 3],
     pub home: V2,
+    /// 君主家（国姓）
+    pub house: &'static str,
+    /// 仕えている人物
+    pub figures: Vec<Person>,
+    /// 人物による生産・武の倍率
+    pub eco_mul: f32,
+    pub mil_mul: f32,
 }
 
 impl Nation {
@@ -449,6 +445,11 @@ pub struct World {
     pub hezong_next: f32,
     pub msgs: Vec<Msg>,
     pub banner: Option<Banner>,
+    banner_queue: VecDeque<Banner>,
+    /// 次に起こる史実イベント
+    hist_i: usize,
+    /// 史書（起きた出来事・起こらなかった出来事）
+    pub chronicle: Vec<Chron>,
     pub shots: Vec<Shot>,
     pub rng: Rng,
     pf: PathFinder,
@@ -497,6 +498,9 @@ impl World {
             hezong_next: 0.0,
             msgs: Vec::new(),
             banner: None,
+            banner_queue: VecDeque::new(),
+            hist_i: 0,
+            chronicle: Vec::new(),
             shots: Vec::new(),
             rng: Rng::new(seed as u64 * 7 + 3),
             pf: PathFinder::new(),
@@ -539,6 +543,10 @@ impl World {
                 earned: [0.0; 3],
                 income: [0.0; 3],
                 home: v2(hx, hy),
+                house: INITIAL_HOUSE[i],
+                figures: Vec::new(),
+                eco_mul: 1.0,
+                mil_mul: 1.0,
             });
             w.ai.push(AiState::new(i as u64 * 31 + seed as u64));
         }
@@ -1443,7 +1451,7 @@ impl World {
         if let Some(b) = &mut self.banner {
             b.t -= dt;
             if b.t <= 0.0 {
-                self.banner = None;
+                self.banner = self.banner_queue.pop_front();
             }
         }
         self.year_tick += dt;
@@ -1460,7 +1468,7 @@ impl World {
         for b in self.blds.iter() {
             if b.alive && b.kind.city() && b.done() {
                 let n = &mut self.nations[b.nation as usize];
-                let m = n.bias * em * if b.kind == BKind::Capital { 1.3 } else { 1.0 };
+                let m = n.bias * n.eco_mul * em * if b.kind == BKind::Capital { 1.3 } else { 1.0 };
                 let add = [0.55 * m * dt, 0.25 * m * dt, 0.12 * m * dt];
                 for k in 0..3 {
                     n.res[k] += add[k];
@@ -1818,7 +1826,7 @@ impl World {
                     self.units[i].dir = (tp - pos).norm();
                     if self.units[i].cooldown <= 0.0 {
                         self.units[i].cooldown = kind.cooldown();
-                        let atk = kind.base_atk() * self.units[i].power * self.rng.range(0.85, 1.15);
+                        let atk = kind.base_atk() * self.units[i].power * self.nations[ni].mil_mul * self.rng.range(0.85, 1.15);
                         let me = self.uh(i);
                         if kind == UnitKind::Archer {
                             self.shots.push(Shot { a: pos, b: tp, t: 0.3 });
@@ -1984,7 +1992,7 @@ impl World {
                 let c = self.blds[di].center();
                 if self.nav(i, c, 1.9, dt) {
                     if self.units[i].pos.dist(c) <= 2.6 {
-                        let carry = self.units[i].carry;
+                        let carry = self.units[i].carry * self.nations[ni].eco_mul;
                         let k = self.units[i].carry_kind;
                         self.nations[ni].res[k] += carry;
                         self.nations[ni].earned[k] += carry;
@@ -2089,6 +2097,7 @@ impl World {
                 self.hezong_next = self.years + 4.0;
             }
         }
+        self.run_history();
         // 終了判定
         let alive: Vec<usize> = (0..self.nations.len()).filter(|&i| self.nations[i].alive).collect();
         if alive.len() == 1 && alive[0] == self.player {
@@ -2103,6 +2112,11 @@ impl World {
     }
 
     fn start_coalition(&mut self, kind: CoalKind, target: usize) {
+        self.start_coalition_ex(kind, target, true);
+    }
+
+    /// 連合を結成する。announce が偽なら通知は呼び出し側に任せる
+    fn start_coalition_ex(&mut self, kind: CoalKind, target: usize, announce: bool) -> bool {
         let tc = self.nations[target].home;
         let reach = if kind == CoalKind::Hegemon { 70.0 } else { 120.0 };
         let mut members: Vec<usize> = (0..self.nations.len())
@@ -2117,13 +2131,13 @@ impl World {
                 leader = Some(i);
             }
         }
-        let Some(leader) = leader else { return };
+        let Some(leader) = leader else { return false };
         if !members.contains(&leader) {
             members.push(leader);
         }
         if members.len() < 2 {
             self.nations[target].hegemon_cd = self.years + 10.0;
-            return;
+            return false;
         }
         // 参加国同士は休戦し、一斉に宣戦
         for a in 0..members.len() {
@@ -2148,11 +2162,14 @@ impl World {
                 format!("最強国 {} に対し、{} を盟主として {} か国が合従した（{}年間）", self.nations[target].name, self.nations[leader].name, members.len(), dur as i32),
             ),
         };
-        self.push_msg(format!("【{}】{}", title, text), [1.0, 0.85, 0.3]);
-        self.banner = Some(Banner { title, text, t: 7.0 });
+        if announce {
+            self.push_msg(format!("【{}】{}", title, text), [1.0, 0.85, 0.3]);
+            self.queue_banner(Banner { title, text, t: 7.0 });
+        }
         self.nations[target].aggression = 0.0;
         self.nations[target].hegemon_cd = self.years + 40.0;
         self.coalitions.push(Coalition { kind, target, leader, members, end: self.years + dur });
+        true
     }
 
     /// 三家分晋と戦国時代の到来
@@ -2273,7 +2290,7 @@ impl World {
             self.territory_dirty = true;
         }
         self.push_msg(format!("【戦国時代】{}", text), [1.0, 0.85, 0.3]);
-        self.banner = Some(Banner { title: "戦国時代の幕開け".into(), text, t: 8.0 });
+        self.queue_banner(Banner { title: "戦国時代の幕開け".into(), text, t: 8.0 });
         self.update_stats();
     }
 
@@ -2306,6 +2323,19 @@ impl World {
 mod tests {
     use super::*;
 
+    /// 年表は降順で、国の番号と国姓表が国家データと揃っている
+    #[test]
+    fn history_table() {
+        assert_eq!(INITIAL_HOUSE.len(), NATIONS.len());
+        for w in HISTORY.windows(2) {
+            assert!(w[0].bc >= w[1].bc, "{} の後に {}", w[0].title, w[1].title);
+        }
+        for e in HISTORY {
+            assert!(e.nation < NATIONS.len());
+            assert!(e.bc <= START_BC as i32 && e.bc > END_BC as i32);
+        }
+    }
+
     /// 全 AI で長期間シミュレーションし、国家の推移とイベントを確認する
     #[test]
     fn long_sim() {
@@ -2318,8 +2348,12 @@ mod tests {
         let years = std::env::var("SIM_YEARS").ok().and_then(|s| s.parse().ok()).unwrap_or(560.0f32);
         let steps = (years * SEC_PER_YEAR / DT) as usize;
         let mut next_report = 0.0;
-        let mut seen_msgs = 0;
+        let mut seen_t = -1.0f32;
         for _ in 0..steps {
+            // 観戦用：見ている国が滅んでも最後まで進める
+            if w.game_over.is_some() && w.year_bc() > END_BC as i32 {
+                w.game_over = None;
+            }
             w.step();
             if w.years >= next_report {
                 next_report += 25.0;
@@ -2332,13 +2366,10 @@ mod tests {
                 let units = w.units.iter().filter(|u| u.alive).count();
                 println!("BC{} t={:.1}s units={} alive={} :: {}", w.year_bc(), t0.elapsed().as_secs_f32(), units, alive.len(), alive.join(" "));
             }
-            while seen_msgs < w.msgs.len() {
-                println!("  [msg] {}", w.msgs[seen_msgs].text);
-                seen_msgs += 1;
+            for m in w.msgs.iter().filter(|m| m.time > seen_t) {
+                println!("  [msg] {}", m.text);
             }
-            if w.msgs.len() >= 60 {
-                seen_msgs = seen_msgs.min(w.msgs.len());
-            }
+            seen_t = w.time;
             if w.game_over.is_some() && w.years > years {
                 break;
             }

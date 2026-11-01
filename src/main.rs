@@ -2,6 +2,7 @@
 //! 春秋戦国 RTS — Rust + Direct3D11 / Direct2D
 
 mod ai;
+mod art;
 mod game;
 mod geo;
 mod gfx;
