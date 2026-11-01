@@ -9,9 +9,11 @@ use std::collections::VecDeque;
 mod history;
 mod trade;
 mod traits;
+mod descent;
 pub use history::{Chron, HKind, Person, HISTORY, INITIAL_HOUSE};
 pub use trade::*;
 pub use traits::*;
+pub use descent::*;
 
 #[derive(Clone, Copy, Default, Debug, PartialEq)]
 pub struct V2 {
@@ -318,6 +320,8 @@ pub struct Unit {
     pub tribe: u8,
     /// 傭兵の契約満了年（0=傭兵ではない）
     pub merc_until: f32,
+    /// 上帝の兵（傷つかない）
+    pub divine: bool,
 }
 
 impl Unit {
@@ -481,6 +485,8 @@ pub struct World {
     pub protect_player: bool,
     /// プレイヤーが部隊に命令した回数
     pub player_orders: u32,
+    /// 上帝降臨（前221年までに天下が定まらなかった）
+    pub descent: Option<Descent>,
     pub time: f32,
     pub ai: Vec<AiState>,
     /// 商人・西域の商人・山岳民と遊牧民
@@ -534,6 +540,7 @@ impl World {
             game_over: None,
             protect_player: false,
             player_orders: 0,
+            descent: None,
             time: 0.0,
             ai: Vec::new(),
             trade: Trade::new(&mut Rng::new(seed as u64 * 13 + 5)),
@@ -725,6 +732,7 @@ impl World {
             last_attacker: None,
             tribe: NONE,
             merc_until: 0.0,
+            divine: false,
         };
         if let Some(i) = self.free_units.pop() {
             let gen = self.units[i as usize].gen + 1;
@@ -986,6 +994,10 @@ impl World {
         if !self.war[a][b] {
             return;
         }
+        // 上帝の降臨した秦とは和睦できない
+        if self.descent.is_some() && (a == 2 || b == 2) {
+            return;
+        }
         self.war[a][b] = false;
         self.war[b][a] = false;
         self.truce[a][b] = self.years + truce_years;
@@ -1055,8 +1067,8 @@ impl World {
                 continue;
             }
             let n = &mut self.nations[u.nation as usize];
-            if u.merc_until > 0.0 {
-                // 傭兵は銭で雇われており、兵数の上限・維持費の外
+            if u.merc_until > 0.0 || u.divine {
+                // 傭兵は銭で雇われており、上帝の兵は天のもの。兵数の上限・維持費の外
                 n.mil_power += u.power * (u.hp / u.max_hp()).max(0.2);
             } else if u.kind.military() {
                 n.soldiers += 1;
@@ -1431,7 +1443,8 @@ impl World {
         let killed;
         {
             let u = &mut self.units[ti];
-            if !u.alive {
+            // 上帝の兵は傷つかない
+            if !u.alive || u.divine {
                 return;
             }
             u.hp -= dmg;
@@ -1576,7 +1589,12 @@ impl World {
         let text = format!("{} は {} に滅ぼされた", self.nations[n].name, by_name);
         self.push_msg(text, [1.0, 0.8, 0.3]);
         if n == self.player {
-            self.game_over = Some((false, format!("{} は {} に滅ぼされた……", self.nations[n].name, by_name)));
+            let t = if self.descent.is_some() {
+                format!("{} は上帝の軍に滅ぼされた……", self.nations[n].name)
+            } else {
+                format!("{} は {} に滅ぼされた……", self.nations[n].name, by_name)
+            };
+            self.game_over = Some((false, t));
         }
     }
 
@@ -1658,7 +1676,7 @@ impl World {
             n.aggression = (n.aggression - dt * 2.0 / spy).max(0.0);
         }
         for u in self.units.iter_mut() {
-            if u.alive && u.kind.military() && starving[u.nation as usize] {
+            if u.alive && u.kind.military() && !u.divine && starving[u.nation as usize] {
                 u.hp -= u.max_hp() * 0.01 * dt;
             }
         }
@@ -2273,14 +2291,15 @@ impl World {
         self.refresh_traits();
         // 終了判定
         let alive: Vec<usize> = (0..NATIONS.len()).filter(|&i| self.nations[i].alive).collect();
-        if alive.len() == 1 && alive[0] == self.player {
-            self.game_over = Some((true, format!("{} は天下を統一した！", self.nations[self.player].name)));
-        } else if yb <= END_BC {
-            let mut ranks: Vec<(f32, usize)> = alive.iter().map(|&i| (self.nations[i].strength, i)).collect();
-            ranks.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
-            let pos = ranks.iter().position(|r| r.1 == self.player).unwrap_or(99) + 1;
-            let win = pos == 1;
-            self.game_over = Some((win, format!("紀元前221年。{} の国力は第{}位（残存{}国）", self.nations[self.player].name, pos, alive.len())));
+        if self.descent.is_none() {
+            if alive.len() == 1 && alive[0] == self.player {
+                self.game_over = Some((true, format!("{} は天下を統一した！", self.nations[self.player].name)));
+            } else if yb <= END_BC {
+                // 史実の統一の年までに天下が定まらなければ、上帝が秦に降臨する
+                self.begin_descent();
+            }
+        } else {
+            self.yearly_descent();
         }
     }
 
@@ -2522,6 +2541,35 @@ mod tests {
         println!("秦→蜀 経路長 {} 終点の距離 {}", path.len(), reach);
         assert!(reach <= 3, "蜀に届かない");
         assert!(path.len() < 110 * MAP_SCALE, "遠回りしている: {}", path.len());
+    }
+
+    /// 前221年に上帝が秦に降臨し、10年で天下を統一して終わる（滅んだ秦も蘇る）
+    #[test]
+    fn descent_unifies() {
+        let mut w = World::new(12345);
+        w.player = HAN;
+        // 秦を先に滅ぼしておく
+        w.eliminate(2, 1);
+        w.game_over = None;
+        w.years = START_BC - END_BC - 0.5;
+        let mut steps = 0;
+        while w.game_over.is_none() && steps < 200_000 {
+            w.step();
+            steps += 1;
+            if let Some((_, t)) = &w.game_over {
+                if !t.contains("天下を統一した") {
+                    // 自国が滅んでも観戦を続ける
+                    w.game_over = None;
+                }
+            }
+        }
+        let d = w.descent.as_ref().expect("上帝が降臨していない");
+        assert!(d.revived, "滅んだ秦が蘇っていない");
+        let alive: Vec<&str> = (0..NATIONS.len()).filter(|&i| w.nations[i].alive).map(|i| w.nations[i].name).collect();
+        println!("降臨 BC{} → 終了 BC{} 残存 {:?} {:?}", (START_BC - d.start) as i32, w.year_bc(), alive, w.game_over);
+        assert_eq!(alive, vec!["秦"]);
+        assert!(w.years - d.start <= DESCENT_YEARS + 1.01);
+        assert!(matches!(&w.game_over, Some((false, _))));
     }
 
     /// 全 AI で長期間シミュレーションし、国家の推移とイベントを確認する

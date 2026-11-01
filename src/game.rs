@@ -715,6 +715,10 @@ impl Game {
                 if let Some(n) = nation {
                     self.title_sel = Some(n);
                     self.do_act(Act::Start);
+                    // 撮影用：指定の年（紀元前）から始める（YY_YEAR=222 など）
+                    if let Some(y) = std::env::var("YY_YEAR").ok().and_then(|v| v.parse::<f32>().ok()) {
+                        self.world.years = START_BC - y;
+                    }
                     self.speed = std::env::var("YY_SPEED").ok().and_then(|v| v.parse().ok()).unwrap_or(8);
                     self.zoom = z;
                     // 撮影直前にキーを押す（例：72 で史記を開く）
@@ -1993,7 +1997,6 @@ impl Game {
     fn render_world_labels(&mut self) {
         let z = self.zoom;
         let (w, h) = (self.gfx.width as f32, self.gfx.height as f32);
-        let era = self.world.era;
         let fog_on = self.fog_active();
         let pl = self.world.player;
 
@@ -2662,6 +2665,9 @@ impl Game {
         self.add_button(w - 80.0, 5.0, w - 4.0, 31.0, "ヘルプ F1", "", 0, true, Act::Help, "");
         if paused {
             self.gfx.text_shadow("一時停止中（Space）", w / 2.0 - 120.0, TOP_H + 60.0, 240.0, 30.0, Font::BigCenter, [1.0, 1.0, 0.8, 1.0]);
+        } else if let Some(left) = self.world.descent_left() {
+            let s = format!("上帝降臨：上帝の軍が天下を統一するまで あと{}年", left.ceil() as i32);
+            self.gfx.text_shadow(&s, w / 2.0 - 320.0, TOP_H + 60.0, 640.0, 30.0, Font::BigCenter, [1.0, 0.75, 0.35, 1.0]);
         } else if self.cmd_hold() {
             self.gfx.text_shadow("指揮中（時は止まっている。命令を出すか選択を解くと進む）", w / 2.0 - 320.0, TOP_H + 60.0, 640.0, 30.0, Font::BigCenter, [0.8, 0.95, 1.0, 1.0]);
         }
@@ -3283,7 +3289,7 @@ impl Game {
         self.add_button(x0 + pw - 90.0, y0 + 10.0, x0 + pw - 14.0, y0 + 40.0, "閉じる", "", 0, true, Act::CloseOverlay, "");
         self.art.draw_inset_box(&self.gfx, x0 + 14.0, y0 + 46.0, x0 + pw - 14.0, y0 + ph - 14.0);
         let text = "\
-■ 目的　紀元前221年まで生き残り、最も強い国となるか、天下を統一せよ。時間は全ての国で共通に流れ（春秋は1年＝4秒、戦国は時間がゆっくり流れ1年＝8秒）、春秋時代（〜前453年）から戦国時代へ移る。どの国も同じ時代補正を受け、一部の国だけ文明が進むことはない。
+■ 目的　紀元前221年までに天下を統一せよ。時間は全ての国で共通に流れ（春秋は1年＝4秒、戦国は時間がゆっくり流れ1年＝8秒）、春秋時代（〜前453年）から戦国時代へ移る。どの国も同じ時代補正を受け、一部の国だけ文明が進むことはない。
 
 ■ 資源　糧（田を耕す）・木（森を伐採）・銅（銅山を採掘）。民が集めて都・邑へ運ぶ。城邑からも少しずつ税収がある。
 
@@ -3296,6 +3302,7 @@ impl Game {
 ■ 合従軍（戦国）　突出して強い国が現れると、周辺国が合従して15年間一斉に攻撃する。
 ■ 三家分晋　戦国時代の到来とともに晋は韓・趙・魏に分かれる。
 ■ 史実の出来事　史実の年になると、英雄・諸子百家・政治指導者が現れて国を強くし（一定年数、生産や武が上がる）、反乱や簒奪で兵や蓄えを失い君主家（国姓）が変わる。その国が滅んでいれば起こらない。記録と各国の君主家・人物は「史記」（F3、外交画面から）で見られる。
+■ 上帝降臨　史実で中華が統一された紀元前221年までに天下を統一できなければ、上帝が秦に降臨する（秦が滅んでいても蘇る）。上帝の軍には抗えず、10年のうちに中華は秦に統一され、ゲームは終わる。
 ■ 国の特徴　国ごとに史実に基づく特徴がある（タイトル画面と史記で確認できる）。周は春秋時代には滅びない（最後の城邑を落とされても攻め手は兵を引く）。秦は関中の険で城が堅く、趙は胡服騎射（前307年〜）で騎兵が強く、韓は強弩、魏は武卒、斉・宋・鄭は商人が集まる、など。
 ■ 交易（F4）　国に属さない商人が諸国を巡り、生産力の高い国ほど多く集まる。商人は領内を通るだけで税（銭）を納め、中原全体の生産量に比例して数が増える。税率は軽いほど商人が集まる。銭は市場で糧・木・銅に換えられる。西域の商人は河西回廊・草原の道・蜀身毒道の先の地域（関中・河東・洛邑、北辺、蜀・巴）にだけ来て、多くの税を落とす。
 ■ 山岳民・遊牧民　犬戎・山戎・林胡・東胡・匈奴・百越などは国ではない。時代に合わせて現れ、守りの薄い国へ略奪に来たり（城邑を落とすと蓄えを奪って引き上げる）、馬や毛皮を商いに来たりする。交易画面から銭で傭兵に雇え、雇った部族はその間その国を襲わない。
@@ -3323,7 +3330,13 @@ impl Game {
         let y0 = h / 2.0 - 140.0;
         self.art.draw_stone_panel(&self.gfx, x0, y0, x0 + pw, y0 + 260.0);
         self.art.draw_corner_ornaments(&self.gfx, x0 + 3.0, y0 + 3.0, x0 + pw - 3.0, y0 + 257.0, 16.0);
-        let title = if win { "勝利" } else { "敗北" };
+        let title = if win {
+            "勝利"
+        } else if self.world.descent.is_some() {
+            "天命は秦に"
+        } else {
+            "敗北"
+        };
         self.gfx.text_shadow(title, x0, y0 + 20.0, pw, 60.0, Font::Title, if win { [1.0, 0.85, 0.4, 1.0] } else { [0.9, 0.4, 0.35, 1.0] });
         self.gfx.text(&text, x0 + 20.0, y0 + 100.0, pw - 40.0, 60.0, Font::BigCenter, [0.95, 0.92, 0.85, 1.0]);
         self.add_button(x0 + pw / 2.0 - 100.0, y0 + 180.0, x0 + pw / 2.0 + 100.0, y0 + 228.0, "新しい天下へ", "", 0, true, Act::Restart, "");
