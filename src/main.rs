@@ -1,11 +1,14 @@
 #![windows_subsystem = "windows"]
 //! 春秋戦国 RTS — Rust + Direct3D11 / Direct2D
 
+#[macro_use]
+mod lang;
 mod ai;
 mod art;
 mod game;
 mod geo;
 mod gfx;
+mod i18n;
 mod path;
 mod platform;
 mod rng;
@@ -117,6 +120,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
 fn main() -> Result<()> {
     unsafe {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        lang::set_lang(platform::initial_lang());
         let inst = GetModuleHandleW(None)?;
         let class = w!("YYEmpireWnd");
         // アプリのアイコン（build.rs が assets/app_icon.ico を資源番号1として埋め込む）
@@ -144,7 +148,7 @@ fn main() -> Result<()> {
         let hwnd = CreateWindowExW(
             WINDOW_EX_STYLE::default(),
             class,
-            w!("春秋戦国 — 中華統一への道"),
+            &HSTRING::from(lang::window_title()),
             WS_OVERLAPPEDWINDOW | WS_VISIBLE,
             CW_USEDEFAULT,
             CW_USEDEFAULT,

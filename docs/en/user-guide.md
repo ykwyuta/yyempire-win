@@ -44,7 +44,9 @@ For an overview of the game, see the [Introduction](introduction.md).
 cargo run --release
 ```
 
-If the text is too small, press **Ctrl + +** or **Ctrl + −** (or use 文字 ＋／− on the title screen). **F11** switches to full screen.
+If the text is too small, press **Ctrl + +** or **Ctrl + −** (or use A− / A+ on the title screen). **F11** switches to full screen.
+
+The language button on the title screen (for example "English ▸") cycles the game between 日本語, English and 中文. Your choice is remembered the next time you start the game. On first start the game follows your Windows display language (English unless it is Japanese or Chinese).
 
 **Saving and loading**: press **F5** (or the 記録 F5 button at the top right) to open the save screen. There are three save slots, plus an autosave every 10 years. Use 続きから on the title screen to continue. Saves are stored in `%APPDATA%\yyempire\saves`; use 書き出す to export a save file (.yysav) and ファイルから読み込む to load one on another PC. The file format is the same as the browser version's. You can't save during the tutorial or after the game has ended.
 

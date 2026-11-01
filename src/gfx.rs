@@ -116,6 +116,45 @@ fn compile(src: &str, entry: PCSTR, target: PCSTR) -> Result<ID3DBlob> {
     Ok(code.unwrap())
 }
 
+/// いまの言語の書体で文字の書式を作る（日本語は游ゴシック、中国語は微軟雅黒、英語は Segoe UI）
+fn make_fonts(dwrite: &IDWriteFactory) -> Result<Vec<IDWriteTextFormat>> {
+    let (family, locale) = match crate::lang::lang() {
+        crate::lang::Lang::Ja => (w!("Yu Gothic UI"), w!("ja-jp")),
+        crate::lang::Lang::Zh => (w!("Microsoft YaHei UI"), w!("zh-cn")),
+        crate::lang::Lang::En => (w!("Segoe UI"), w!("en-us")),
+    };
+    let specs: [(f32, bool, bool); 7] = [
+        (12.0, false, false),
+        (14.0, false, false),
+        (14.0, true, false),
+        (18.0, false, true),
+        (20.0, true, true),
+        (40.0, true, true),
+        (15.0, true, true),
+    ];
+    let mut fonts = Vec::new();
+    for (size, center, bold) in specs {
+        unsafe {
+            let f = dwrite.CreateTextFormat(
+                family,
+                None,
+                if bold { DWRITE_FONT_WEIGHT_BOLD } else { DWRITE_FONT_WEIGHT_NORMAL },
+                DWRITE_FONT_STYLE_NORMAL,
+                DWRITE_FONT_STRETCH_NORMAL,
+                size,
+                locale,
+            )?;
+            if center {
+                f.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
+                f.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
+            }
+            f.SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP)?;
+            fonts.push(f);
+        }
+    }
+    Ok(fonts)
+}
+
 pub fn col(r: f32, g: f32, b: f32, a: f32) -> [f32; 4] {
     [r, g, b, a]
 }
@@ -275,33 +314,7 @@ impl Gfx {
 
             let d2d_factory: ID2D1Factory = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)?;
             let dwrite: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
-            let mut fonts = Vec::new();
-            let specs: [(f32, bool, bool); 7] = [
-                (12.0, false, false),
-                (14.0, false, false),
-                (14.0, true, false),
-                (18.0, false, true),
-                (20.0, true, true),
-                (40.0, true, true),
-                (15.0, true, true),
-            ];
-            for (size, center, bold) in specs {
-                let f = dwrite.CreateTextFormat(
-                    w!("Yu Gothic UI"),
-                    None,
-                    if bold { DWRITE_FONT_WEIGHT_BOLD } else { DWRITE_FONT_WEIGHT_NORMAL },
-                    DWRITE_FONT_STYLE_NORMAL,
-                    DWRITE_FONT_STRETCH_NORMAL,
-                    size,
-                    w!("ja-jp"),
-                )?;
-                if center {
-                    f.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
-                    f.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
-                }
-                f.SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP)?;
-                fonts.push(f);
-            }
+            let fonts = make_fonts(&dwrite)?;
 
             let mut g = Gfx {
                 device,
@@ -685,6 +698,16 @@ impl Gfx {
         let fmt = &self.fonts[f as usize];
         unsafe {
             rt.DrawText(&self.wbuf, fmt, &D2D_RECT_F { left: x, top: y, right: x + w, bottom: y + h }, b, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+        }
+    }
+
+    /// 言語が変わったら書体と窓の題名を作り直す
+    pub fn reload_fonts(&mut self) {
+        if let Ok(f) = make_fonts(&self.dwrite) {
+            self.fonts = f;
+        }
+        unsafe {
+            let _ = windows::Win32::UI::WindowsAndMessaging::SetWindowTextW(self.hwnd, &HSTRING::from(crate::lang::window_title()));
         }
     }
 

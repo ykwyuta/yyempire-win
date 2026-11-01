@@ -13,11 +13,14 @@ mod descent;
 mod heroes;
 mod save;
 pub use history::{Chron, HKind, Person, HISTORY, INITIAL_HOUSE};
+#[cfg(test)]
+pub use history::Fx;
 pub use trade::*;
 pub use traits::*;
 pub use descent::*;
 pub use heroes::*;
 pub use save::SAVE_VERSION;
+pub use crate::lang::{sep, tx};
 
 #[derive(Clone, Copy, Default, Debug, PartialEq)]
 pub struct V2 {
@@ -103,14 +106,14 @@ impl UnitKind {
     }
     pub fn name(self, era: Era) -> &'static str {
         match self {
-            UnitKind::Worker => "民",
-            UnitKind::Infantry => "戈兵",
-            UnitKind::Archer => "弩兵",
+            UnitKind::Worker => t!("民", "Worker", "民"),
+            UnitKind::Infantry => t!("戈兵", "Halberdier", "戈兵"),
+            UnitKind::Archer => t!("弩兵", "Crossbowman", "弩兵"),
             UnitKind::Chariot => {
                 if era == Era::Spring {
-                    "戦車"
+                    t!("戦車", "Chariot", "战车")
                 } else {
-                    "騎兵"
+                    t!("騎兵", "Cavalry", "骑兵")
                 }
             }
         }
@@ -219,11 +222,11 @@ pub const FORT_COOLDOWN: f32 = 1.5;
 impl BKind {
     pub fn name(self) -> &'static str {
         match self {
-            BKind::Capital => "都",
-            BKind::Town => "邑",
-            BKind::Barracks => "兵営",
-            BKind::Farm => "田",
-            BKind::Fort => "要塞",
+            BKind::Capital => t!("都", "Capital", "都城"),
+            BKind::Town => t!("邑", "Town", "邑"),
+            BKind::Barracks => t!("兵営", "Barracks", "兵营"),
+            BKind::Farm => t!("田", "Field", "田"),
+            BKind::Fort => t!("要塞", "Fort", "要塞"),
         }
     }
     pub fn cost(self) -> [f32; 3] {
@@ -824,7 +827,7 @@ impl World {
     /// 建設可能か（理由付き）
     pub fn can_place(&self, nation: usize, kind: BKind, tx: i32, ty: i32) -> Result<(), &'static str> {
         if !self.footprint_free(tx, ty) {
-            return Err("ここには建設できない");
+            return Err(t!("ここには建設できない", "Cannot build here", "此处无法建造"));
         }
         let c = v2(tx as f32 + 1.0, ty as f32 + 1.0);
         let own = |x: i32, y: i32| self.owner[Map::idx(x, y)];
@@ -832,33 +835,33 @@ impl World {
             BKind::Town | BKind::Capital => {
                 for b in self.blds.iter() {
                     if b.alive && b.kind.city() && b.center().dist(c) < 9.0 {
-                        return Err("他の城邑に近すぎる");
+                        return Err(t!("他の城邑に近すぎる", "Too close to another city", "离其他城邑太近"));
                     }
                 }
                 for dy in 0..2 {
                     for dx in 0..2 {
                         let o = own(tx + dx, ty + dy);
                         if o != NONE && o as usize != nation {
-                            return Err("他国の領土には築城できない");
+                            return Err(t!("他国の領土には築城できない", "Cannot found a city in another state's territory", "不能在他国领土筑城"));
                         }
                     }
                 }
                 // 自国領から遠すぎない
                 let near = self.blds.iter().any(|b| b.alive && b.nation as usize == nation && b.kind.city() && b.center().dist(c) < 26.0);
                 if !near {
-                    return Err("自国の城邑から遠すぎる");
+                    return Err(t!("自国の城邑から遠すぎる", "Too far from your cities", "离己方城邑太远"));
                 }
             }
             _ => {
                 for dy in 0..2 {
                     for dx in 0..2 {
                         if own(tx + dx, ty + dy) as usize != nation {
-                            return Err("自国の領土内に建設する必要がある");
+                            return Err(t!("自国の領土内に建設する必要がある", "Must be built inside your territory", "必须建在己方领土内"));
                         }
                     }
                 }
                 if kind == BKind::Fort && self.fort_count(nation) >= self.nations[nation].fort_cap() {
-                    return Err("要塞の数が上限に達している（城邑を増やすと上限が上がる）");
+                    return Err(t!("要塞の数が上限に達している（城邑を増やすと上限が上がる）", "Fort limit reached (more cities raise the limit)", "要塞数量已达上限（城邑越多上限越高）"));
                 }
             }
         }
@@ -1041,7 +1044,7 @@ impl World {
         }
         let p = self.player;
         if a == p || b == p {
-            let t = format!("{} が {} に宣戦布告した", self.nations[a].name, self.nations[b].name);
+            let t = tf!("{} が {} に宣戦布告した", "{} declared war on {}", "{}向{}宣战", tx(self.nations[a].name), tx(self.nations[b].name));
             self.push_msg(t, [1.0, 0.45, 0.35]);
         }
         true
@@ -1062,7 +1065,7 @@ impl World {
         if a == self.player || b == self.player {
             let o = if a == self.player { b } else { a };
             self.peace_offer[o] = false;
-            let t = format!("{} と和睦した（{}年間の休戦）", self.nations[o].name, truce_years as i32);
+            let t = tf!("{} と和睦した（{}年間の休戦）", "Made peace with {} ({}-year truce)", "与{}议和（休战{}年）", tx(self.nations[o].name), truce_years as i32);
             self.push_msg(t, [0.6, 0.9, 0.6]);
         }
     }
@@ -1078,7 +1081,7 @@ impl World {
         if !self.war[a][b] || (self.descent.is_some() && o == 2) || self.peace_asks.iter().any(|q| q.from == o) {
             return false;
         }
-        let t = format!("{} が和睦を申し入れてきた（{}）", self.nations[o].name, why);
+        let t = tf!("{} が和睦を申し入れてきた（{}）", "{} offers peace ({})", "{}提出议和（{}）", tx(self.nations[o].name), why);
         self.push_msg(t, [0.7, 0.9, 1.0]);
         self.peace_asks.push_back(PeaceAsk { from: o, years: truce_years, why: why.to_string() });
         false
@@ -1101,7 +1104,7 @@ impl World {
         } else {
             self.peace_offer[q.from] = false;
             self.offer_cd[q.from] = self.years + 8.0;
-            let t = format!("{} の和睦の申し入れを退けた（交戦を続ける）", self.nations[q.from].name);
+            let t = tf!("{} の和睦の申し入れを退けた（交戦を続ける）", "Refused {}'s offer of peace (the war goes on)", "拒绝了{}的议和（继续交战）", tx(self.nations[q.from].name));
             self.push_msg(t, [1.0, 0.6, 0.4]);
         }
     }
@@ -1322,7 +1325,7 @@ impl World {
     pub fn place_building(&mut self, nation: usize, kind: BKind, tx: i32, ty: i32) -> Result<Handle, &'static str> {
         self.can_place(nation, kind, tx, ty)?;
         if !self.try_pay(nation, kind.cost()) {
-            return Err("資源が足りない");
+            return Err(t!("資源が足りない", "Not enough resources", "资源不足"));
         }
         Ok(self.spawn_building(nation, kind, tx, ty, false))
     }
@@ -1341,22 +1344,22 @@ impl World {
     pub fn enqueue(&mut self, bh: Handle, kind: UnitKind) -> Result<(), &'static str> {
         let Some(b) = self.bld(bh) else { return Err("") };
         if !self.can_train(b, kind) {
-            return Err("ここでは訓練できない");
+            return Err(t!("ここでは訓練できない", "Cannot train that here", "此处无法训练"));
         }
         if b.queue.len() >= 5 {
-            return Err("訓練待ちが一杯");
+            return Err(t!("訓練待ちが一杯", "Training queue is full", "训练队列已满"));
         }
         let ni = b.nation as usize;
         let n = &self.nations[ni];
         if kind.military() {
             if n.soldiers + n.q_soldiers >= n.mil_cap() {
-                return Err("軍事ユニットが上限に達している");
+                return Err(t!("軍事ユニットが上限に達している", "Soldier limit reached", "军事单位已达上限"));
             }
         } else if n.workers + n.q_workers >= n.worker_cap() {
-            return Err("生産ユニットが上限に達している");
+            return Err(t!("生産ユニットが上限に達している", "Worker limit reached", "生产单位已达上限"));
         }
         if !self.try_pay(ni, self.train_cost(ni, kind)) {
-            return Err("資源が足りない");
+            return Err(t!("資源が足りない", "Not enough resources", "资源不足"));
         }
         let b = self.bld_mut(bh).unwrap();
         b.queue.push_back(kind);
@@ -1395,22 +1398,22 @@ impl World {
         let cap = self.power_cap();
         let Some(u) = self.unit(h) else { return Err("") };
         if u.merc_until > 0.0 {
-            return Err("傭兵は鍛錬できない");
+            return Err(t!("傭兵は鍛錬できない", "Mercenaries cannot be trained", "佣兵无法训练"));
         }
         if u.hero != NONE {
-            return Err("英霊は鍛錬できない");
+            return Err(t!("英霊は鍛錬できない", "Heroic spirits cannot be trained", "英灵无法训练"));
         }
         if u.power + 0.01 >= cap {
-            return Err("この時代の能力上限に達している");
+            return Err(t!("この時代の能力上限に達している", "Already at this era's power limit", "已达本时代能力上限"));
         }
         let (x, y) = u.pos.tile();
         if self.owner[Map::idx(x, y)] != u.nation {
-            return Err("自国領内でのみ鍛錬できる");
+            return Err(t!("自国領内でのみ鍛錬できる", "Can only train inside your territory", "只能在己方领土内训练"));
         }
         let ni = u.nation as usize;
         let cost = self.upgrade_cost(u);
         if !self.try_pay(ni, cost) {
-            return Err("資源が足りない");
+            return Err(t!("資源が足りない", "Not enough resources", "资源不足"));
         }
         let u = self.unit_mut(h).unwrap();
         let ratio = u.hp / u.max_hp();
@@ -1423,19 +1426,19 @@ impl World {
     pub fn convert_unit(&mut self, h: Handle) -> Result<(), &'static str> {
         let Some(u) = self.unit(h) else { return Err("") };
         if u.merc_until > 0.0 {
-            return Err("傭兵は民にできない");
+            return Err(t!("傭兵は民にできない", "Mercenaries cannot become workers", "佣兵无法转为民"));
         }
         if u.hero != NONE {
-            return Err("英霊は民にできない");
+            return Err(t!("英霊は民にできない", "Heroic spirits cannot become workers", "英灵无法转为民"));
         }
         let ni = u.nation as usize;
         let n = &self.nations[ni];
         let to_mil = !u.kind.military();
         if to_mil && n.soldiers + n.q_soldiers >= n.mil_cap() {
-            return Err("軍事ユニットが上限に達している");
+            return Err(t!("軍事ユニットが上限に達している", "Soldier limit reached", "军事单位已达上限"));
         }
         if !to_mil && n.workers + n.q_workers >= n.worker_cap() {
-            return Err("生産ユニットが上限に達している");
+            return Err(t!("生産ユニットが上限に達している", "Worker limit reached", "生产单位已达上限"));
         }
         let u = self.unit_mut(h).unwrap();
         let ratio = u.hp / u.max_hp();
@@ -1643,7 +1646,7 @@ impl World {
             let (vn, kind) = (b.nation as usize, b.kind);
             self.remove_building(bi);
             if vn == self.player {
-                self.push_msg(format!("{}が破壊された", kind.name()), [1.0, 0.5, 0.4]);
+                self.push_msg(tf!("{}が破壊された", "Our {} was destroyed", "{}被摧毁了", kind.name()), [1.0, 0.5, 0.4]);
             }
         }
     }
@@ -1670,7 +1673,7 @@ impl World {
                     }
                 }
             }
-            let t = format!("{} は天子の都を前に兵を引いた（春秋時代、周は滅びない）", self.nations[an].name);
+            let t = tf!("{} は天子の都を前に兵を引いた（春秋時代、周は滅びない）", "{} withdrew before the capital of the Son of Heaven (Zhou cannot fall in the Spring and Autumn period)", "{}在天子都城前撤兵（春秋时代周不会灭亡）", tx(self.nations[an].name));
             self.push_msg(t, [1.0, 0.9, 0.5]);
             return;
         }
@@ -1692,8 +1695,8 @@ impl World {
         self.territory_dirty = true;
         self.nations[an].aggression += 25.0;
         let p = self.player;
-        let name = if was_cap { "都" } else { "邑" };
-        let text = format!("{} が {} の{}を攻略した", self.nations[an].name, self.nations[old].name, name);
+        let name = if was_cap { t!("都", "capital", "都城") } else { t!("邑", "town", "邑") };
+        let text = tf!("{} が {} の{}を攻略した", "{} took {}'s {}", "{}攻占了{}的{}", tx(self.nations[an].name), tx(self.nations[old].name), name);
         let col = if an == p { [0.5, 1.0, 0.5] } else if old == p { [1.0, 0.35, 0.3] } else { [0.85, 0.85, 0.7] };
         if an == p || old == p || was_cap {
             self.push_msg(text, col);
@@ -1742,14 +1745,14 @@ impl World {
             self.war[n][o] = false;
             self.war[o][n] = false;
         }
-        let by_name = if by < self.nations.len() { self.nations[by].name } else { "?" };
-        let text = format!("{} は {} に滅ぼされた", self.nations[n].name, by_name);
+        let by_name = if by < self.nations.len() { tx(self.nations[by].name) } else { "?" };
+        let text = tf!("{} は {} に滅ぼされた", "{} was destroyed by {}", "{}被{}所灭", tx(self.nations[n].name), by_name);
         self.push_msg(text, [1.0, 0.8, 0.3]);
         if n == self.player {
             let t = if self.descent.is_some() {
-                format!("{} は上帝の軍に滅ぼされた……", self.nations[n].name)
+                tf!("{} は上帝の軍に滅ぼされた……", "{} was destroyed by the army of the Supreme Deity...", "{}被上帝之军所灭……", tx(self.nations[n].name))
             } else {
-                format!("{} は {} に滅ぼされた……", self.nations[n].name, by_name)
+                tf!("{} は {} に滅ぼされた……", "{} was destroyed by {}...", "{}被{}所灭……", tx(self.nations[n].name), by_name)
             };
             self.game_over = Some((false, t));
         }
@@ -2332,7 +2335,7 @@ impl World {
                         }
                         if ni == self.player {
                             let nm = self.bld(bh).unwrap().kind.name();
-                            self.push_msg(format!("{}が完成した", nm), [0.7, 0.9, 1.0]);
+                            self.push_msg(tf!("{}が完成した", "{} completed", "{}建成了", nm), [0.7, 0.9, 1.0]);
                         }
                     }
                 } else {
@@ -2529,11 +2532,11 @@ impl World {
             let c = self.coalitions.remove(k);
             for &m in c.members.iter() {
                 if self.nations[m].alive && self.nations[c.target].alive {
-                    self.propose_peace(m, c.target, 8.0, "連合の解散");
+                    self.propose_peace(m, c.target, 8.0, t!("連合の解散", "the coalition disbanded", "联军解散"));
                 }
             }
-            let name = if c.kind == CoalKind::Hegemon { "覇者の呼びかけによる討伐" } else { "合従軍" };
-            let t = format!("{}（{}討伐）が解散した", name, self.nations[c.target].name);
+            let name = if c.kind == CoalKind::Hegemon { t!("覇者の呼びかけによる討伐", "The Hegemon's campaign", "霸主号召的讨伐") } else { t!("合従軍", "The Grand Alliance", "合纵军") };
+            let t = tf!("{}（{}討伐）が解散した", "{} against {} has disbanded", "{}（讨伐{}）已解散", name, tx(self.nations[c.target].name));
             self.push_msg(t, [0.9, 0.9, 0.6]);
         }
         // 覇者の呼びかけ（春秋）
@@ -2566,7 +2569,7 @@ impl World {
         let alive: Vec<usize> = (0..NATIONS.len()).filter(|&i| self.nations[i].alive).collect();
         if self.descent.is_none() {
             if alive.len() == 1 && alive[0] == self.player {
-                self.game_over = Some((true, format!("{} は天下を統一した！", self.nations[self.player].name)));
+                self.game_over = Some((true, tf!("{} は天下を統一した！", "{} has unified the realm!", "{}统一了天下！", tx(self.nations[self.player].name))));
             } else if yb <= END_BC {
                 // 史実の統一の年までに天下が定まらなければ、上帝が秦に降臨する
                 self.begin_descent();
@@ -2609,7 +2612,7 @@ impl World {
             for b in a + 1..members.len() {
                 let (ma, mb) = (members[a], members[b]);
                 if self.war[ma][mb] {
-                    self.propose_peace(ma, mb, 15.0, "連合への参加");
+                    self.propose_peace(ma, mb, 15.0, t!("連合への参加", "joining a coalition", "加入联军"));
                 }
             }
         }
@@ -2619,12 +2622,12 @@ impl World {
         let dur = 15.0;
         let (title, text) = match kind {
             CoalKind::Hegemon => (
-                "覇者の呼びかけ".to_string(),
-                format!("{} が諸侯に呼びかけた。{} を討つべく {} か国が兵を挙げる（{}年間）", self.nations[leader].name, self.nations[target].name, members.len(), dur as i32),
+                t!("覇者の呼びかけ", "The Hegemon's Call", "霸主号召").to_string(),
+                tf!("{} が諸侯に呼びかけた。{} を討つべく {} か国が兵を挙げる（{}年間）", "{0} has called on the lords. {2} states take up arms against {1} ({3} years)", "{}号召诸侯，{2}国起兵讨伐{1}（{3}年）", tx(self.nations[leader].name), tx(self.nations[target].name), members.len(), dur as i32),
             ),
             CoalKind::Hezong => (
-                "合従軍".to_string(),
-                format!("最強国 {} に対し、{} を盟主として {} か国が合従した（{}年間）", self.nations[target].name, self.nations[leader].name, members.len(), dur as i32),
+                t!("合従軍", "Grand Alliance", "合纵军").to_string(),
+                tf!("最強国 {} に対し、{} を盟主として {} か国が合従した（{}年間）", "{2} states led by {1} have allied against {0}, the strongest power ({3} years)", "以{1}为盟主的{2}国合纵，对抗最强国{0}（{3}年）", tx(self.nations[target].name), tx(self.nations[leader].name), members.len(), dur as i32),
             ),
         };
         if announce {
@@ -2641,9 +2644,9 @@ impl World {
     fn begin_warring(&mut self) {
         self.era = Era::Warring;
         self.hezong_next = self.years + 15.0;
-        let mut text = String::from("周王室の権威は失墜し、七雄が覇を競う時代となった。");
+        let mut text = String::from(t!("周王室の権威は失墜し、七雄が覇を競う時代となった。", "The authority of the Zhou kings has collapsed, and the Seven Powers contend for supremacy. ", "周王室权威扫地，七雄争霸的时代到来了。"));
         if self.nations[JIN].alive {
-            text.push_str("晋は韓・趙・魏の三家に分割された。");
+            text.push_str(t!("晋は韓・趙・魏の三家に分割された。", "Jin has been divided among the Han, Zhao and Wei clans. ", "晋被韩、赵、魏三家瓜分。"));
             let seats = [HAN, ZHAO, WEI];
             let seat_pos: Vec<V2> = seats.iter().map(|&s| self.nations[s].home).collect();
             let near = |p: V2| -> usize {
@@ -2748,14 +2751,14 @@ impl World {
                     }
                 }
                 self.player = best.1;
-                text.push_str(&format!("あなたは {} を率いる。", self.nations[best.1].name));
+                text.push_str(&tf!("あなたは {} を率いる。", "You now lead {}.", "你将率领{}。", tx(self.nations[best.1].name)));
             }
             self.nations[JIN].alive = false;
             self.nations[JIN].capital = None;
             self.territory_dirty = true;
         }
-        self.push_msg(format!("【戦国時代】{}", text), [1.0, 0.85, 0.3]);
-        self.queue_banner(Banner { title: "戦国時代の幕開け".into(), text, t: 8.0 });
+        self.push_msg(tf!("【戦国時代】{}", "[Warring States] {}", "【战国时代】{}", text), [1.0, 0.85, 0.3]);
+        self.queue_banner(Banner { title: t!("戦国時代の幕開け", "The Warring States Begin", "战国时代的开幕").into(), text, t: 8.0 });
         self.update_stats();
     }
 

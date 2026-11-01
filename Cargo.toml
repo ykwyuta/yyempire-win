@@ -23,6 +23,7 @@ features = [
     "Win32_UI_HiDpi",
     "Win32_UI_Controls_Dialogs",
     "Win32_System_SystemInformation",
+    "Win32_Globalization",
 ]
 
 [dependencies]
