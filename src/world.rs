@@ -12,7 +12,7 @@ mod traits;
 mod descent;
 mod heroes;
 mod save;
-pub use history::{Chron, HKind, Person, HISTORY, INITIAL_HOUSE};
+pub use history::{Chron, Person, HISTORY, INITIAL_HOUSE};
 #[cfg(test)]
 pub use history::Fx;
 pub use trade::*;
@@ -390,7 +390,6 @@ impl Building {
 }
 
 pub struct Nation {
-    pub def: usize,
     pub name: &'static str,
     pub color: [f32; 3],
     pub bias: f32,
@@ -615,7 +614,6 @@ impl World {
         for (i, d) in NATIONS.iter().enumerate() {
             let (hx, hy) = ll_to_tile(d.lon, d.lat);
             w.nations.push(Nation {
-                def: i,
                 name: d.name,
                 color: d.color,
                 bias: d.bias,
@@ -653,7 +651,6 @@ impl World {
         }
         // 部族の兵の仮の枠（国としては扱わない）
         w.nations.push(Nation {
-            def: TRIBE,
             name: "夷狄",
             color: [0.62, 0.42, 0.24],
             bias: 0.0,
@@ -3250,7 +3247,6 @@ mod tests {
             }
         }
         println!("elapsed {:.1}s for {} steps", t0.elapsed().as_secs_f32(), steps);
-        let names = ["misc", "stats", "economy", "trade", "buildings", "grid", "units", "separate", "paths", "territory", "yearly", "ai"];
     }
 
     #[test]

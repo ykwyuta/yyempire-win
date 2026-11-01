@@ -329,10 +329,6 @@ impl Game {
         }
     }
 
-    pub(super) fn tut_is_next_step(&self) -> bool {
-        self.tut.as_ref().map_or(false, |t| STEPS[t.step].goal == Goal::Next)
-    }
-
     fn hl_world(&self, h: Hl) -> Vec<V2> {
         let pl = self.world.player;
         let cap = self.world.nations[pl].capital.and_then(|h| self.world.bld(h)).map(|b| b.center()).unwrap_or(self.world.nations[pl].home);

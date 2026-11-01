@@ -57,7 +57,6 @@ pub enum Font {
     Big,
     BigCenter,
     Title,
-    Label,
 }
 
 pub struct Gfx {
@@ -127,14 +126,13 @@ fn make_fonts(dwrite: &IDWriteFactory) -> Result<Vec<IDWriteTextFormat>> {
         crate::lang::Lang::Zh => (w!("Microsoft YaHei UI"), w!("zh-cn")),
         crate::lang::Lang::En => (w!("Segoe UI"), w!("en-us")),
     };
-    let specs: [(f32, bool, bool); 7] = [
+    let specs: [(f32, bool, bool); 6] = [
         (12.0, false, false),
         (14.0, false, false),
         (14.0, true, false),
         (18.0, false, true),
         (20.0, true, true),
         (40.0, true, true),
-        (15.0, true, true),
     ];
     let mut fonts = Vec::new();
     for (size, center, bold) in specs {
@@ -157,10 +155,6 @@ fn make_fonts(dwrite: &IDWriteFactory) -> Result<Vec<IDWriteTextFormat>> {
         }
     }
     Ok(fonts)
-}
-
-pub fn col(r: f32, g: f32, b: f32, a: f32) -> [f32; 4] {
-    [r, g, b, a]
 }
 
 impl Gfx {
