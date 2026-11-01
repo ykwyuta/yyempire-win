@@ -42,17 +42,27 @@ impl Game {
                 self.gfx.fill_rect(rx, ry, rx + colw - 8.0, ry + rowh, [1.0, 1.0, 1.0, 0.04]);
             }
             let owner = self.world.units.iter().find(|u| u.alive && u.hero as usize == k).map(|u| u.nation as usize);
+            let isz = (rowh - 4.0).clamp(24.0, 36.0);
+            let ix0 = rx + 4.0;
+            let iy0 = ry + (rowh - isz) * 0.5;
+            self.gfx.fill_round(ix0, iy0, ix0 + isz, iy0 + isz, 3.0, [0.10, 0.08, 0.05, 0.92]);
+            if let Some(hbmp) = self.art.hero_sprite(k, false) {
+                self.gfx.draw_bitmap(hbmp, ix0 + 1.0, iy0 + 1.0, ix0 + isz - 1.0, iy0 + isz - 1.0);
+            }
+            self.gfx.stroke_round(ix0, iy0, ix0 + isz, iy0 + isz, 3.0, 1.0, if owner.is_some() { [0.45, 0.40, 0.32, 0.8] } else { [0.92, 0.78, 0.36, 0.92] });
+
+            let tx = rx + isz + 10.0;
             let ue = if d.kind == UnitKind::Chariot { Era::Warring } else { era };
             let s = format!("{}（{}）", d.name, d.era);
-            self.gfx.text(&s, rx + 6.0, ry + 2.0, 200.0, 22.0, Font::Normal, if owner.is_some() { dim } else { gold });
+            self.gfx.text(&s, tx, ry + (rowh - 22.0) * 0.5, 194.0, 22.0, Font::Normal, if owner.is_some() { dim } else { gold });
             let s = format!("{}　×{:.1}", d.kind.name(ue), d.mult);
-            self.gfx.text(&s, rx + 206.0, ry + 4.0, 110.0, 20.0, Font::Small, tc);
+            self.gfx.text(&s, tx + 194.0, ry + (rowh - 20.0) * 0.5, 96.0, 20.0, Font::Small, tc);
             let st = match owner {
                 Some(o) => format!("{}が召喚中", self.world.nations[o].name),
                 None if p > 0.0 => format!("能力 {:.1}", p * d.mult),
                 None => String::new(),
             };
-            self.gfx.text(&st, rx + 316.0, ry + 4.0, colw - 410.0, 20.0, Font::Small, if owner.is_some() { [1.0, 0.6, 0.5, 1.0] } else { [0.7, 0.92, 1.0, 1.0] });
+            self.gfx.text(&st, tx + 290.0, ry + (rowh - 20.0) * 0.5, colw - (isz + 10.0) - 384.0, 20.0, Font::Small, if owner.is_some() { [1.0, 0.6, 0.5, 1.0] } else { [0.7, 0.92, 1.0, 1.0] });
             let ok = self.world.can_summon(pl, k, &own);
             let tip = match ok {
                 Ok(()) => format!("{}\n民{}人を生贄に捧げて召喚する（能力 {:.1}）", d.desc, victims.len(), p * d.mult),
