@@ -2,8 +2,10 @@
 
 use crate::rng::{fbm, hash2, Rng};
 
-pub const MAP_W: usize = 280;
-pub const MAP_H: usize = 240;
+/// 地図の細かさ（1度あたりのタイル数の倍率。2で面積は旧来の4倍）
+pub const MAP_SCALE: usize = 2;
+pub const MAP_W: usize = 280 * MAP_SCALE;
+pub const MAP_H: usize = 240 * MAP_SCALE;
 pub const LON0: f32 = 102.0;
 pub const LON1: f32 = 124.0;
 pub const LAT_TOP: f32 = 42.5;
@@ -133,6 +135,21 @@ const RANGES: &[Range] = &[
     Range { w: 0.30, pts: &[(117.5, 29.8), (118.8, 30.1), (119.5, 30.4)] },                              // 黄山・天目山
     Range { w: 0.30, pts: &[(117.2, 35.9), (117.9, 36.2), (118.4, 35.8)] },                              // 泰山・沂蒙
     Range { w: 0.25, pts: &[(112.3, 36.0), (112.8, 36.9)] },                                              // 太岳山
+];
+
+/// 山越えの古道（山脈を貫いて通れる幅を残す）
+pub struct Road {
+    pub name: &'static str,
+    pub pts: &'static [(f32, f32)],
+}
+pub const ROADS: &[Road] = &[
+    // 関中→漢中：秦嶺越え
+    Road { name: "褒斜道", pts: &[(107.65, 34.30), (107.55, 33.90), (107.35, 33.45), (107.05, 33.12)] },
+    Road { name: "故道（陳倉道）", pts: &[(107.15, 34.36), (106.75, 34.00), (106.55, 33.60), (106.80, 33.25), (107.05, 33.12)] },
+    // 漢中→蜀：大巴山・剣閣越え（石牛道）
+    Road { name: "金牛道", pts: &[(107.05, 33.12), (106.55, 32.75), (106.05, 32.40), (105.60, 32.00), (105.10, 31.50), (104.55, 31.05), (104.06, 30.67)] },
+    // 蜀→滇：西南夷の道（蜀身毒道）
+    Road { name: "蜀身毒道", pts: &[(104.06, 30.67), (104.30, 29.70), (104.60, 28.80), (104.20, 27.80), (103.60, 26.60), (103.00, 25.50), (102.00, 24.90)] },
 ];
 
 fn point_in_poly(px: f32, py: f32, poly: &[(f32, f32)]) -> bool {
@@ -373,6 +390,18 @@ pub fn generate_map(seed: u32) -> Map {
             raster_line(&mut map, w[0], w[1], r.major);
         }
     }
+    // 古道：山を丘に削り、通れるようにする
+    for r in ROADS {
+        for y in 0..MAP_H as i32 {
+            for x in 0..MAP_W as i32 {
+                let (lon, lat) = tile_to_ll(x as f32 + 0.5, y as f32 + 0.5);
+                let i = Map::idx(x, y);
+                if dist_poly(lon, lat, r.pts) < 0.11 && matches!(map.terrain[i], Terrain::Mountain | Terrain::Forest) {
+                    map.terrain[i] = Terrain::Hill;
+                }
+            }
+        }
+    }
     // 国都の周囲を平地にし、木材・銅を保証
     let mut rng = Rng::new(seed as u64 ^ 0x1234);
     for nd in NATIONS {
@@ -404,7 +433,7 @@ pub fn generate_map(seed: u32) -> Map {
     for y in (2..MAP_H as i32 - 2).step_by(1) {
         for x in 2..MAP_W as i32 - 2 {
             if map.terrain[Map::idx(x, y)] == Terrain::Hill && hash2(x, y, seed ^ 0x77) < 0.035 {
-                if map.mines.iter().all(|m| (m.x - x).abs() + (m.y - y).abs() > 7) {
+                if map.mines.iter().all(|m| (m.x - x).abs() + (m.y - y).abs() > 10) {
                     map.mines.push(Mine { x, y, amount: 2500.0 });
                 }
             }
@@ -508,7 +537,7 @@ fn connect_regions(map: &mut Map) {
         // 一定以上の大きさの孤立領域を本領域へ接続
         let mut target = None;
         for (id, &sz) in sizes.iter().enumerate() {
-            if id as u32 != main && sz >= 12 {
+            if id as u32 != main && sz >= 12 * MAP_SCALE * MAP_SCALE {
                 target = Some(id as u32);
                 break;
             }

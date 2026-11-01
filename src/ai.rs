@@ -1,6 +1,6 @@
 //! コンピュータ国家の思考
 
-use crate::geo::Map;
+use crate::geo::{Map, NATIONS};
 use crate::rng::Rng;
 use crate::world::*;
 
@@ -25,7 +25,7 @@ impl AiState {
 pub fn update_all(w: &mut World, dt: f32) {
     let mut ais = std::mem::take(&mut w.ai);
     for n in 0..ais.len() {
-        if n == w.player || !w.nations[n].alive {
+        if (n == w.player && !w.ai_player) || !w.nations[n].alive {
             continue;
         }
         let a = &mut ais[n];
@@ -106,7 +106,8 @@ fn think(w: &mut World, n: usize, a: &mut AiState) {
     let nat = &w.nations[n];
     let (wc, mc) = (nat.worker_cap(), nat.mil_cap());
     let (nw, nm) = (nat.workers + nat.q_workers, nat.soldiers + nat.q_soldiers);
-    let at_war_any = (0..w.nations.len()).any(|o| w.at_war(n, o));
+    let at_war_any = (0..NATIONS.len()).any(|o| w.at_war(n, o));
+    w.ai_trade(n, &mut a.rng);
 
     // ---- 民の訓練
     if nw < wc && res[0] >= 50.0 + if at_war_any { 40.0 } else { 0.0 } {
@@ -224,7 +225,7 @@ fn think(w: &mut World, n: usize, a: &mut AiState) {
     if cities.len() < max_cities && !towns_building && res[1] >= 250.0 && res[0] >= 100.0 && res[2] >= 80.0 && a.rng.chance(0.3) {
         let c = cities[a.rng.below(cities.len() as u32) as usize];
         let cc = w.bld(c).unwrap().center();
-        if let Some((tx, ty)) = find_spot(w, n, BKind::Town, cc, 10.0, 17.0, &mut a.rng) {
+        if let Some((tx, ty)) = find_spot(w, n, BKind::Town, cc, 11.0, 21.0, &mut a.rng) {
             if let Ok(bh) = w.place_building(n, BKind::Town, tx, ty) {
                 let mut hs = Vec::new();
                 for x in workers.iter_mut() {
@@ -289,7 +290,7 @@ fn diplomacy(w: &mut World, n: usize, a: &mut AiState, nsold: usize) {
     let my = w.nations[n].strength;
     let years = w.years;
     // 和睦
-    for e in 0..w.nations.len() {
+    for e in 0..NATIONS.len() {
         if !w.at_war(n, e) || w.coalition_locked(n, e) {
             continue;
         }
@@ -308,7 +309,7 @@ fn diplomacy(w: &mut World, n: usize, a: &mut AiState, nsold: usize) {
         }
     }
     // 宣戦
-    let wars = (0..w.nations.len()).filter(|&o| w.at_war(n, o)).count();
+    let wars = (0..NATIONS.len()).filter(|&o| w.at_war(n, o)).count();
     if wars > 0 || years < 12.0 || nsold < 5 {
         return;
     }
@@ -317,13 +318,13 @@ fn diplomacy(w: &mut World, n: usize, a: &mut AiState, nsold: usize) {
     }
     let home = w.nations[n].home;
     let mut best: Option<(f32, usize)> = None;
-    for o in 0..w.nations.len() {
+    for o in 0..NATIONS.len() {
         let on = &w.nations[o];
         if o == n || !on.alive || w.truce[n][o] > years || w.coalition_locked(n, o) || (o == w.player && w.protect_player) {
             continue;
         }
         let d = on.home.dist(home);
-        if d > 45.0 {
+        if d > 90.0 {
             continue;
         }
         if on.strength < my * 0.75 {
@@ -361,7 +362,7 @@ fn command_army(w: &mut World, n: usize, a: &mut AiState, soldiers: &[(Handle, O
         // 防衛：手の空いている兵と近くの兵を向かわせる
         let hs: Vec<Handle> = soldiers
             .iter()
-            .filter(|s| s.1 == Order::Idle || (matches!(s.1, Order::AttackMove(_)) && s.2.dist(home) < 25.0))
+            .filter(|s| s.1 == Order::Idle || (matches!(s.1, Order::AttackMove(_)) && s.2.dist(home) < 40.0))
             .map(|s| s.0)
             .collect();
         if !hs.is_empty() {
@@ -378,7 +379,7 @@ fn command_army(w: &mut World, n: usize, a: &mut AiState, soldiers: &[(Handle, O
     }
     if target_nation.is_none() {
         let mut best: Option<(f32, usize)> = None;
-        for o in 0..w.nations.len() {
+        for o in 0..NATIONS.len() {
             if w.at_war(n, o) {
                 let d = w.nations[o].home.dist(home);
                 if best.map_or(true, |b| d < b.0) {

@@ -32,6 +32,15 @@ impl Game {
         let s = format!("生産 ×{:.2}　　武 ×{:.2}", n.eco_mul, n.mil_mul);
         self.gfx.text(&s, lx0 + 12.0, y, lw - 24.0, 20.0, Font::Small, tc);
         y += 22.0;
+        // 国の特徴
+        let yb = self.world.year_bc();
+        for t in all_traits_of(pl) {
+            let on = traits_of(pl, yb).any(|x| std::ptr::eq(x, t));
+            let s = format!("【{}】{}{}", t.name, t.desc, if on { "" } else { "（この年代には無効）" });
+            let th = self.gfx.measure_h(&s, Font::Small, lw - 32.0);
+            self.gfx.text(&s, lx0 + 20.0, y, lw - 32.0, th + 2.0, Font::Small, if on { [0.70, 0.92, 1.0, 1.0] } else { dim });
+            y += th + 4.0;
+        }
         let years = self.world.years;
         let lines = Self::figure_lines(&self.world.nations[pl], years);
         if lines.is_empty() {
@@ -48,7 +57,7 @@ impl Game {
         self.gfx.text("諸侯の君主家と人物", lx0 + 12.0, y, lw - 24.0, 22.0, Font::Normal, gold);
         y += 26.0;
         // 人物がいるか、君主家が変わった国を強い順に
-        let mut list: Vec<usize> = (0..self.world.nations.len())
+        let mut list: Vec<usize> = (0..NATIONS.len())
             .filter(|&i| {
                 let n = &self.world.nations[i];
                 i != pl && n.alive && (n.figures.iter().any(|f| f.until > years) || n.house != INITIAL_HOUSE[i] || NATIONS[i].seven)
