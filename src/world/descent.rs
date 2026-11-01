@@ -129,17 +129,24 @@ impl World {
             .collect();
         rest.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
         let want = if p >= 1.0 { taken + rest.len() } else { ((total as f32 * p).ceil() as usize).max(taken) };
-        let n = (want - taken).min(rest.len());
-        for &(_, bi) in rest.iter().take(n) {
-            if !self.blds[bi].alive || self.blds[bi].nation as usize == QIN {
+        // 英霊が秦を滅ぼしていれば、もう攻略は進まない
+        let n = if self.nations[QIN].alive { (want - taken).min(rest.len()) } else { 0 };
+        // 英霊の守る城邑は奪えない
+        let mut done = 0;
+        for &(_, bi) in rest.iter() {
+            if done >= n {
+                break;
+            }
+            if !self.blds[bi].alive || self.blds[bi].nation as usize == QIN || self.hero_guarded(bi) {
                 continue;
             }
             self.capture_city(bi, QIN);
             let h = self.bh(bi);
             self.spawn_divine(h, 2);
+            done += 1;
         }
         if let Some(d) = &mut self.descent {
-            d.taken += n;
+            d.taken += done;
         }
         // 上帝の兵は次の城へ
         let next: Vec<V2> = rest.iter().skip(n).take(6).map(|&(_, bi)| self.blds[bi].center()).collect();
@@ -149,6 +156,23 @@ impl World {
                 let g = next[k % next.len()];
                 self.order_move(&[h], g, true);
             }
+        }
+        // 英霊モード：10年後の版図が上帝の秦より広ければ勝利
+        if p >= 1.0 && self.game_over.is_none() && self.heroic {
+            self.recompute_territory();
+            self.update_stats();
+            let pl = self.player;
+            let (mine, god) = (self.nations[pl].tiles, self.nations[QIN].tiles);
+            let text = if pl != QIN && self.nations[pl].alive && mine > god {
+                self.game_over = Some((true, format!("英霊とともに上帝の軍を退けた！ {} の版図 {} は上帝の秦 {} を上回った", self.nations[pl].name, mine, god)));
+                return;
+            } else if pl == QIN {
+                "上帝の軍が天下を統一した。秦の覇業は上帝のものとなった……".to_string()
+            } else {
+                format!("{} の版図 {} は上帝の秦 {} に及ばなかった。天命は秦に……", self.nations[pl].name, mine, god)
+            };
+            self.game_over = Some((false, text));
+            return;
         }
         // 天下統一：強制終了
         if p >= 1.0 && self.game_over.is_none() {

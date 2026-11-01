@@ -1,6 +1,7 @@
 //! 画面・入力・HUD（独自実装の UI）
 
 mod chronicle;
+mod heroes;
 mod market;
 mod tutorial;
 
@@ -97,6 +98,9 @@ enum Act {
     Tax(u8),
     Buy(usize),
     Hire(usize),
+    ToggleHeroic,
+    Summon,
+    SummonHero(usize),
     Tutorial,
     TutNext,
     TutQuit,
@@ -163,6 +167,9 @@ pub struct Game {
     show_help: bool,
     show_chron: bool,
     show_market: bool,
+    show_summon: bool,
+    /// タイトル画面で選ぶ英霊モード（既定は無効）
+    heroic_opt: bool,
     chron_scroll: usize,
     title_sel: Option<usize>,
     notice: Option<(String, f32)>,
@@ -288,6 +295,8 @@ impl Game {
             show_help: false,
             show_chron: false,
             show_market: false,
+            show_summon: false,
+            heroic_opt: false,
             chron_scroll: 0,
             title_sel: None,
             notice: None,
@@ -593,7 +602,7 @@ impl Game {
                 return true;
             }
         }
-        if self.show_diplo || self.show_help || self.show_chron || self.show_market || self.world.game_over.is_some() {
+        if self.show_diplo || self.show_help || self.show_chron || self.show_market || self.show_summon || self.world.game_over.is_some() {
             return true;
         }
         y < TOP_H || y > self.gfx.height as f32 - BOT_H
@@ -711,10 +720,17 @@ impl Game {
                     if let Some(s) = std::env::var("YY_SEL").ok().and_then(|v| v.parse().ok()) {
                         self.title_sel = Some(s);
                     }
+                    if std::env::var("YY_HEROIC").is_ok() {
+                        self.heroic_opt = true;
+                    }
                 }
                 if let Some(n) = nation {
                     self.title_sel = Some(n);
                     self.do_act(Act::Start);
+                    // 撮影用：英霊モード（YY_HEROIC=1）
+                    if std::env::var("YY_HEROIC").is_ok() {
+                        self.world.heroic = true;
+                    }
                     // 撮影用：自国も AI に任せる（YY_AIPLAY=1）
                     self.world.ai_player = std::env::var("YY_AIPLAY").is_ok();
                     // 撮影用：指定の年（紀元前）から始める（YY_YEAR=222 など）
@@ -724,10 +740,15 @@ impl Game {
                     self.speed = std::env::var("YY_SPEED").ok().and_then(|v| v.parse().ok()).unwrap_or(8);
                     self.zoom = z;
                     // 撮影直前にキーを押す（例：72 で史記を開く）
-                    if let Some(k) = std::env::var("YY_PRESS").ok().and_then(|v| u32::from_str_radix(&v, 16).ok()) {
+                    // YY_PRESS は「47,48」のように複数のキーを0.5秒おきに押せる
+                    if let Ok(v) = std::env::var("YY_PRESS") {
                         let at = std::env::var("YY_PRESS_AT").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(secs - 0.6);
                         let t = at.max(self.clock + 0.3);
-                        self.script = vec![(t, Ev::Key(k, true)), (t + 0.05, Ev::Key(k, false))];
+                        for (i, k) in v.split(',').filter_map(|s| u32::from_str_radix(s.trim(), 16).ok()).enumerate() {
+                            let tk = t + i as f32 * 0.5;
+                            self.script.push((tk, Ev::Key(k, true)));
+                            self.script.push((tk + 0.05, Ev::Key(k, false)));
+                        }
                     }
                     if std::env::var("YY_DEMO").is_ok() {
                         self.speed = 1;
@@ -864,7 +885,7 @@ impl Game {
                             return false;
                         }
                         let (mx0, my0, mx1, my1) = self.mm_rect();
-                        if x >= mx0 && x <= mx1 && y >= my0 && y <= my1 && !self.show_diplo && !self.show_help && !self.show_chron && !self.show_market {
+                        if x >= mx0 && x <= mx1 && y >= my0 && y <= my1 && !self.show_diplo && !self.show_help && !self.show_chron && !self.show_market && !self.show_summon {
                             self.mm_drag = true;
                             self.minimap_jump(x, y);
                             return false;
@@ -995,7 +1016,8 @@ impl Game {
             VK_ESCAPE => {
                 if self.mode != Mode::Normal {
                     self.mode = Mode::Normal;
-                } else if self.show_diplo || self.show_help || self.show_chron || self.show_market {
+                } else if self.show_diplo || self.show_help || self.show_chron || self.show_market || self.show_summon {
+                    self.show_summon = false;
                     self.show_diplo = false;
                     self.show_help = false;
                     self.show_chron = false;
@@ -1538,6 +1560,7 @@ impl Game {
             Act::Start => {
                 if let Some(n) = self.title_sel {
                     self.world.player = n;
+                    self.world.heroic = self.heroic_opt;
                     self.screen = Screen::Playing;
                     self.zoom = 22.0;
                     self.cam = self.world.nations[n].home;
@@ -1571,6 +1594,7 @@ impl Game {
                 self.show_help = false;
                 self.show_chron = false;
                 self.show_market = false;
+                self.show_summon = false;
                 self.paused = false;
                 self.speed = 1;
                 self.fit_title_camera();
@@ -1754,7 +1778,30 @@ impl Game {
             Act::ChronPage(d) => {
                 self.chron_scroll = (self.chron_scroll as i32 + d).max(0) as usize;
             }
+            Act::ToggleHeroic => {
+                self.heroic_opt = !self.heroic_opt;
+            }
+            Act::Summon => {
+                if self.world.heroic {
+                    self.show_summon = !self.show_summon;
+                    self.show_diplo = false;
+                    self.show_help = false;
+                    self.show_chron = false;
+                    self.show_market = false;
+                }
+            }
+            Act::SummonHero(k) => {
+                let own = self.own_sel();
+                match self.world.summon_hero(pl, k, &own) {
+                    Ok(h) => {
+                        self.show_summon = false;
+                        self.sel = vec![h];
+                    }
+                    Err(e) => self.notice(e),
+                }
+            }
             Act::CloseOverlay => {
+                self.show_summon = false;
                 self.show_diplo = false;
                 self.show_help = false;
                 self.show_chron = false;
@@ -1833,6 +1880,9 @@ impl Game {
             self.art.ensure(&self.gfx);
             self.buttons.clear();
             self.render_world_labels();
+            if self.screen == Screen::Playing {
+                self.render_hero_labels();
+            }
             if self.screen == Screen::Title {
                 self.render_title();
             } else {
@@ -1848,6 +1898,9 @@ impl Game {
                 }
                 if self.show_market {
                     self.render_market();
+                }
+                if self.show_summon {
+                    self.render_summon();
                 }
                 if self.world.game_over.is_some() {
                     self.render_gameover();
@@ -1950,6 +2003,10 @@ impl Game {
             }
             let nc = wd.nations[u.nation as usize].color;
             let ue = if (u.tribe as usize) < TRIBES.len() && TRIBES[u.tribe as usize].nomad { Era::Warring } else { era };
+            if u.hero != NONE {
+                g.circle(u.pos.x, u.pos.y + 0.15, 0.75, 16, [1.0, 0.85, 0.35, 0.35]);
+                g.ring(u.pos.x, u.pos.y + 0.15, 0.75, (2.0 * px).max(0.05), 16, [1.0, 0.85, 0.35, 0.95]);
+            }
             crate::art::draw_world_unit(g, u, nc, ue, &RES_COLORS, px);
         }
         // 矢
@@ -2519,6 +2576,11 @@ impl Game {
             self.add_button(px + 50.0, 530.0, w - 50.0, 576.0, "この国で覇業を開始", "", 0, true, Act::Start, "");
         }
         let ty = (h - 128.0).max(592.0);
+        let hl = if self.heroic_opt { "英霊モード：オン" } else { "英霊モード：オフ" };
+        self.add_button(px + 24.0, ty - 54.0, w - 24.0, ty - 12.0, hl, "", 0, true, Act::ToggleHeroic, "三皇五帝から春秋戦国の英霊を、民を生贄にして時代と国を超えて呼べる（一国に一体）。英霊は上帝の軍を傷つけられ、上帝降臨から10年後の版図が上帝の秦より広ければ勝利。他国も召喚する");
+        if self.heroic_opt {
+            self.gfx.stroke_round(px + 24.0, ty - 54.0, w - 24.0, ty - 12.0, 3.0, 2.0, [1.0, 0.85, 0.4, 1.0]);
+        }
         self.add_button(px + 24.0, ty, w - 24.0, ty + 48.0, "はじめての方は：チュートリアル", "", 0, true, Act::Tutorial, "晋の君主として、操作と遊び方を1段ずつ学ぶ");
         let ty = ty + 60.0;
         self.add_button(px + 24.0, ty, px + 104.0, ty + 40.0, "文字 −", "", 0, true, Act::Scale(-1), "文字と画面部品を小さくする（Ctrl＋−）");
@@ -2532,7 +2594,8 @@ impl Game {
             // 説明の行数に合わせて上へ伸ばす
             let x0 = px + 24.0;
             let th = self.gfx.measure_h(&t, Font::Small, w - x0 - 40.0) + 10.0;
-            let y1 = ty - 64.0;
+            // 英霊モードの切り替えボタンの上に出す
+            let y1 = ty - 124.0;
             self.art.draw_inset_box(&self.gfx, x0, y1 - th - 4.0, w - 24.0, y1);
             self.gfx.text(&t, x0 + 8.0, y1 - th, w - x0 - 40.0, th, Font::Small, [0.95, 0.92, 0.85, 1.0]);
         }
@@ -2790,12 +2853,17 @@ impl Game {
         self.art.draw_inset_box(&self.gfx, ix, py + 6.0, ix + iw, h - 4.0);
         self.art.draw_corner_ornaments(&self.gfx, ix + 2.0, py + 8.0, ix + iw - 2.0, h - 6.0, 11.0);
         self.render_info(ix + 12.0, py + 12.0, iw - 24.0);
+        // 英霊モード：民を選んでいれば英霊召喚ボタン
+        if self.world.heroic && self.own_sel().iter().any(|&h| self.world.unit(h).map_or(false, |u| u.kind == UnitKind::Worker)) {
+            let tip = if self.world.hero_of(pl).is_some() { "英霊は一国に一体だけ。いまの英霊が倒れれば、また呼べる" } else { "選んだ民を生贄に捧げ、三皇五帝から春秋戦国の英霊を呼ぶ（英霊の能力＝生贄の能力の合計×1.1〜3.0）" };
+            self.add_button(ix + iw - 176.0, h - 58.0, ix + iw - 14.0, h - 14.0, "英霊召喚", "民を生贄に", 'H' as u32, self.world.hero_of(pl).is_none(), Act::Summon, tip);
+        }
 
         // 右側のコマンド欄ボックス
         let cx0 = w - 388.0;
         self.art.draw_inset_box(&self.gfx, cx0, py + 6.0, w - 4.0, h - 4.0);
         self.art.draw_corner_ornaments(&self.gfx, cx0 + 2.0, py + 8.0, w - 6.0, h - 6.0, 11.0);
-        if !self.show_diplo && !self.show_help && !self.show_chron && !self.show_market {
+        if !self.show_diplo && !self.show_help && !self.show_chron && !self.show_market && !self.show_summon {
             self.render_commands(w - 382.0, py + 12.0);
         }
 
@@ -2864,7 +2932,10 @@ impl Game {
 
             let tx = x + 102.0;
             let tw = (wd - 102.0).max(100.0);
-            let title = if (u.tribe as usize) < TRIBES.len() {
+            let title = if (u.hero as usize) < HEROES.len() {
+                let d = &HEROES[u.hero as usize];
+                format!("英霊・{}（{}）【{}】", d.name, d.era, n.name)
+            } else if (u.tribe as usize) < TRIBES.len() {
                 let td = &TRIBES[u.tribe as usize];
                 let ue = if td.nomad { Era::Warring } else { era };
                 if u.merc_until > 0.0 {
@@ -3308,6 +3379,7 @@ impl Game {
 ■ 三家分晋　戦国時代の到来とともに晋は韓・趙・魏に分かれる。
 ■ 史実の出来事　史実の年になると、英雄・諸子百家・政治指導者が現れて国を強くし（一定年数、生産や武が上がる）、反乱や簒奪で兵や蓄えを失い君主家（国姓）が変わる。その国が滅んでいれば起こらない。記録と各国の君主家・人物は「史記」（F3、外交画面から）で見られる。
 ■ 上帝降臨　史実で中華が統一された紀元前221年までに天下を統一できなければ、上帝が秦に降臨する（秦が滅んでいても蘇る）。上帝の軍には抗えず、10年のうちに中華は秦に統一され、ゲームは終わる。
+■ 英霊モード（タイトル画面で選ぶ。既定はオフ）　民を選んで「英霊召喚」（H）を押すと、選んだ民を生贄に捧げて三皇五帝から春秋戦国までの英霊を時代と国を超えて呼べる。英霊の能力は生贄の能力の合計の1.1〜3.0倍（英霊ごとに異なる）。一国が同時に従えられる英霊は一体だけで、同じ英霊は二国に現れない。他国も召喚する。英霊だけが上帝の兵を傷つけられ、英霊の近くの城邑は上帝の軍にも奪われない。上帝降臨から10年後、自国の版図が上帝の秦より広ければ勝利。
 ■ 国の特徴　国ごとに史実に基づく特徴がある（タイトル画面と史記で確認できる）。周は春秋時代には滅びない（最後の城邑を落とされても攻め手は兵を引く）。秦は関中の険で城が堅く、趙は胡服騎射（前307年〜）で騎兵が強く、韓は強弩、魏は武卒、斉・宋・鄭は商人が集まる、など。
 ■ 交易（F4）　国に属さない商人が諸国を巡り、生産力の高い国ほど多く集まる。商人は領内を通るだけで税（銭）を納め、中原全体の生産量に比例して数が増える。税率は軽いほど商人が集まる。銭は市場で糧・木・銅に換えられる。西域の商人は河西回廊・草原の道・蜀身毒道の先の地域（関中・河東・洛邑、北辺、蜀・巴）にだけ来て、多くの税を落とす。
 ■ 山岳民・遊牧民　犬戎・山戎・林胡・東胡・匈奴・百越などは国ではない。時代に合わせて現れ、守りの薄い国へ略奪に来たり（城邑を落とすと蓄えを奪って引き上げる）、馬や毛皮を商いに来たりする。交易画面から銭で傭兵に雇え、雇った部族はその間その国を襲わない。

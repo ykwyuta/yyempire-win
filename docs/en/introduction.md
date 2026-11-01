@@ -37,6 +37,9 @@ Heroes, philosophers of the Hundred Schools and statesmen appear in their histor
 - **Time stops while you command**: while you have your own units selected, time stands still.
 - **Slower Warring States**: time flows more slowly once the Warring States period begins.
 
+### Heroic Spirits mode (optional)
+Turn on Heroic Spirits mode on the title screen and you can sacrifice workers to call heroes from the Three Sovereigns and Five Emperors to the Warring States, such as the Yellow Emperor, Yu the Great, Jiang Ziya, Sun Tzu and Bai Qi, regardless of era or state. Each state may have only one hero, and rival states summon them too. Only heroes can stand against the Deity's army.
+
 ### The Mandate's deadline
 China was unified in 221 BC. If you have not unified it by then, the Supreme Deity descends upon Qin. Qin rises again even if it was destroyed, and no one can resist the Deity's army. History will not wait for you.
 

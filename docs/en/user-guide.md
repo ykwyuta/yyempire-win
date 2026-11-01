@@ -23,8 +23,9 @@ For an overview of the game, see the [Introduction](introduction.md).
 13. [Merchants from the Western Regions](#13-merchants-from-the-western-regions)
 14. [State traits](#14-state-traits)
 15. [The Descent of the Supreme Deity (time limit)](#15-the-descent-of-the-supreme-deity-time-limit)
-16. [Keyboard reference](#16-keyboard-reference)
-17. [Tips](#17-tips)
+16. [Heroic Spirits mode (optional)](#16-heroic-spirits-mode-optional)
+17. [Keyboard reference](#17-keyboard-reference)
+18. [Tips](#18-tips)
 
 ---
 
@@ -294,13 +295,52 @@ If China is still divided after 221 BC, **the Supreme Deity (上帝) descends up
 - Every year, more cities pass to Qin, nearest to its capital first, until **all of China is unified within 10 years**.
 - The game ends in **forced defeat** when your state falls or when the 10 years are over. Even playing as Qin does not count as a victory.
 
-The top of the screen shows how many years remain.
+The top of the screen shows how many years remain. In Heroic Spirits mode you have a way to resist the Deity's army (see [section 16](#16-heroic-spirits-mode-optional)).
 
-## 16. Keyboard reference
+## 16. Heroic Spirits mode (optional)
+
+![Choosing Heroic Spirits mode](../images/heroic_title.jpg)
+
+Heroic Spirits mode is **off by default**. Switch 「英霊モード：オフ／オン」 on the title screen before you choose a state and start. It is always off in the tutorial.
+
+**How to summon**
+1. Select workers inside your own territory (up to 10).
+2. Click **Summon Hero (英霊召喚, H)** at the bottom right of the info panel.
+3. Choose a hero and click 「召喚」 (Summon). The selected workers are sacrificed and the hero appears where they stood.
+
+![Summoning](../images/summon.jpg)
+
+**Rules for heroes**
+- You can call 31 heroes, from the Three Sovereigns and Five Emperors to the Warring States, **regardless of era or state**. Qin can call Sun Tzu.
+- A hero's power is **the total power of the sacrificed workers × the hero's multiplier (1.1 to 3.0)**. For example, the Yellow Emperor is ×3.0, Bai Qi ×2.9 and Confucius ×1.1. Heroes can exceed the era's power cap.
+- Each hero fights as a halberdier, a crossbowman or a cavalryman (chariot).
+- **A state can have only one hero at a time.** If your hero falls, you can call another. The same hero never appears for two states at once.
+- Heroes do not count toward your soldier limit or upkeep, and they slowly heal. You cannot train them or turn them into workers.
+- **Other states summon heroes too**, sacrificing their workers when at war or when the Deity descends.
+
+**Heroes and the Supreme Deity**
+- **Only heroes** can harm the Deity's soldiers, and their blows strike three times as hard.
+- A state's cities within 15 tiles of its hero are spared from the Deity's yearly conquest. The Deity's soldiers can still take them by force.
+- When 10 years have passed since the Descent, **you win if your territory is larger than the Deity's Qin**. Otherwise you lose. Playing as Qin never counts as a win.
+
+![Heroes against the Deity's army](../images/hero_descent.jpg)
+
+| Heroes | Era | Unit | Multiplier |
+|---|---|---|---|
+| Fuxi, Nüwa, Shennong | Three Sovereigns | crossbow, halberd, halberd | 2.2, 2.4, 2.0 |
+| Yellow Emperor, Zhuanxu, Ku, Yao, Shun | Five Emperors | cavalry, halberd, crossbow, halberd, halberd | 3.0, 2.0, 1.9, 1.8, 1.8 |
+| Yu the Great, King Tang | Xia, Shang | halberd, cavalry | 2.6, 2.3 |
+| Jiang Ziya, King Wu of Zhou, Duke of Zhou | Zhou | crossbow, cavalry, halberd | 2.5, 2.4, 1.6 |
+| Guan Zhong, Duke Wen of Jin, Sun Tzu, Wu Zixu, Goujian, Confucius | Spring and Autumn | crossbow, cavalry, crossbow, halberd, halberd, crossbow | 1.4, 1.9, 2.6, 2.1, 1.7, 1.1 |
+| Wu Qi, Sun Bin, Yue Yi, Tian Dan, Lian Po, Zhao She, Lord Xinling | Warring States | halberd, crossbow, cavalry, cavalry, halberd, crossbow, crossbow | 2.5, 2.3, 2.2, 2.0, 2.4, 2.0, 2.1 |
+| Li Mu, Bai Qi, Wang Jian, Xiang Yan, Jing Ke | Warring States | cavalry, halberd, cavalry, halberd, halberd | 2.7, 2.9, 2.8, 2.2, 1.5 |
+
+## 17. Keyboard reference
 
 | Key | Action |
 |---|---|
 | F1 / F2 / F3 / F4 | Help / Diplomacy / Chronicle / Trade |
+| H | Summon a hero (Heroic Spirits mode, with workers selected) |
 | A | Attack-move |
 | S | Stop |
 | T | Train / Educate |
@@ -317,7 +357,7 @@ The top of the screen shows how many years remain.
 
 ![Help](../images/help.jpg)
 
-## 17. Tips
+## 18. Tips
 
 - **Start with workers.** Build fields and gather grain, wood and bronze evenly. 「全民・自動」 (all workers – auto) makes this easy.
 - **Grow with towns.** Your worker and soldier limits depend on your number of cities, so build towns to expand.
