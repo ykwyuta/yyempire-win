@@ -5,13 +5,15 @@
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
-use windows::core::{w, PCWSTR, PWSTR};
+use windows::core::{w, HSTRING, PCWSTR, PWSTR};
 use windows::Win32::System::SystemInformation::GetLocalTime;
 use windows::Win32::UI::Controls::Dialogs::*;
 use windows::Win32::UI::Input::KeyboardAndMouse::GetActiveWindow;
 
 /// 記録画面に出す説明
-pub const STORAGE_NOTE: &str = "記録はこのパソコン（%APPDATA%\\yyempire\\saves）に保存される。別のパソコンへ移すときや控えには、書き出したファイルを読み込む";
+pub fn storage_note() -> &'static str {
+    t!("記録はこのパソコン（%APPDATA%\\yyempire\\saves）に保存される。別のパソコンへ移すときや控えには、書き出したファイルを読み込む", "Saves are kept on this PC (%APPDATA%\\yyempire\\saves). To move them to another PC or keep a backup, export a file and load it there.", "存档保存在本机（%APPDATA%\\yyempire\\saves）。如需转移到其他电脑或备份，请导出文件后再读取。")
+}
 
 const SLOTS: usize = 4;
 
@@ -25,6 +27,35 @@ thread_local! {
 
 fn note(s: String) {
     NOTES.with(|n| n.borrow_mut().push(s));
+}
+
+/// 設定ファイル（%APPDATA%\\yyempire\\settings.txt）
+fn settings_path() -> PathBuf {
+    let d = save_dir();
+    d.parent().map(Path::to_path_buf).unwrap_or(d).join("settings.txt")
+}
+
+/// 起動時の表示言語：保存した設定、無ければ Windows の表示言語（日本語・中国語・それ以外は英語）
+pub fn initial_lang() -> crate::lang::Lang {
+    use crate::lang::Lang;
+    if let Some(l) = std::env::var("YY_LANG").ok().and_then(|v| Lang::from_code(&v)) {
+        return l;
+    }
+    let saved = std::fs::read_to_string(settings_path()).ok().and_then(|s| s.lines().find_map(|l| l.strip_prefix("lang=").and_then(Lang::from_code)));
+    if let Some(l) = saved {
+        return l;
+    }
+    let id = unsafe { windows::Win32::Globalization::GetUserDefaultUILanguage() };
+    match id & 0x3ff {
+        0x11 => Lang::Ja,
+        0x04 => Lang::Zh,
+        _ => Lang::En,
+    }
+}
+
+/// 表示言語を設定ファイルに書く
+pub fn save_lang(l: crate::lang::Lang) {
+    let _ = write_atomic(&settings_path(), format!("lang={}\n", l.code()).as_bytes());
 }
 
 /// 記録の置き場所（無ければ作る）
@@ -62,7 +93,7 @@ fn read_info(slot: u8) -> Option<(String, String)> {
     }
     let s = std::fs::read_to_string(meta_path(slot)).unwrap_or_default();
     let mut it = s.lines();
-    let meta = it.next().unwrap_or("（見出しなし）").to_string();
+    let meta = it.next().unwrap_or(t!("（見出しなし）", "(no title)", "（无标题）")).to_string();
     let date = it.next().unwrap_or("").to_string();
     Some((meta, date))
 }
@@ -85,7 +116,7 @@ pub fn save_slot(slot: u8, data: &[u8], meta: &str) {
                 *e = Some((meta.to_string(), date));
             }
         }),
-        Err(e) => note(format!("記録できなかった：{}", e)),
+        Err(e) => note(tf!("記録できなかった：{}", "Could not save: {}", "无法保存：{}", e)),
     }
 }
 
@@ -93,7 +124,7 @@ pub fn save_slot(slot: u8, data: &[u8], meta: &str) {
 pub fn load_slot(slot: u8) {
     match std::fs::read(data_path(slot)) {
         Ok(d) => LOADED.with(|l| *l.borrow_mut() = Some(d)),
-        Err(e) => note(format!("読み込めなかった：{}", e)),
+        Err(e) => note(tf!("読み込めなかった：{}", "Could not load: {}", "无法读取：{}", e)),
     }
 }
 
@@ -111,7 +142,9 @@ fn from_wide(buf: &[u16]) -> String {
     String::from_utf16_lossy(&buf[..n])
 }
 
-const FILTER: &str = "春秋戦国の記録 (*.yysav)\0*.yysav\0すべてのファイル (*.*)\0*.*\0\0";
+fn filter() -> &'static str {
+    t!("春秋戦国の記録 (*.yysav)\0*.yysav\0すべてのファイル (*.*)\0*.*\0\0", "Warring States save (*.yysav)\0*.yysav\0All files (*.*)\0*.*\0\0", "春秋战国存档 (*.yysav)\0*.yysav\0所有文件 (*.*)\0*.*\0\0")
+}
 
 /// 枠の記録をファイルとして書き出す（保存先を尋ねる）
 pub fn export_slot(slot: u8) {
@@ -119,7 +152,7 @@ pub fn export_slot(slot: u8) {
     let data = match std::fs::read(&src) {
         Ok(d) => d,
         Err(_) => {
-            note("この枠には記録がない".into());
+            note(t!("この枠には記録がない", "This slot is empty", "此栏位没有存档").into());
             return;
         }
     };
@@ -129,7 +162,8 @@ pub fn export_slot(slot: u8) {
     let mut buf = [0u16; 1024];
     let w = wide(&name);
     buf[..w.len().min(1023)].copy_from_slice(&w[..w.len().min(1023)]);
-    let filter: Vec<u16> = FILTER.encode_utf16().collect();
+    let filter: Vec<u16> = filter().encode_utf16().collect();
+    let title = HSTRING::from(t!("記録を書き出す", "Export save", "导出存档"));
     let mut ofn = OPENFILENAMEW {
         lStructSize: std::mem::size_of::<OPENFILENAMEW>() as u32,
         hwndOwner: unsafe { GetActiveWindow() },
@@ -137,7 +171,7 @@ pub fn export_slot(slot: u8) {
         lpstrFile: PWSTR(buf.as_mut_ptr()),
         nMaxFile: buf.len() as u32,
         lpstrDefExt: w!("yysav"),
-        lpstrTitle: w!("記録を書き出す"),
+        lpstrTitle: PCWSTR(title.as_ptr()),
         Flags: OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR,
         ..Default::default()
     };
@@ -146,22 +180,23 @@ pub fn export_slot(slot: u8) {
     }
     let path = from_wide(&buf);
     match std::fs::write(&path, data) {
-        Ok(()) => note(format!("書き出した：{}", path)),
-        Err(e) => note(format!("書き出せなかった：{}", e)),
+        Ok(()) => note(tf!("書き出した：{}", "Exported: {}", "已导出：{}", path)),
+        Err(e) => note(tf!("書き出せなかった：{}", "Could not export: {}", "无法导出：{}", e)),
     }
 }
 
 /// 記録ファイルを選んで読み込む
 pub fn import_file() {
     let mut buf = [0u16; 1024];
-    let filter: Vec<u16> = FILTER.encode_utf16().collect();
+    let filter: Vec<u16> = filter().encode_utf16().collect();
+    let title = HSTRING::from(t!("記録ファイルを読み込む", "Load a save file", "读取存档文件"));
     let mut ofn = OPENFILENAMEW {
         lStructSize: std::mem::size_of::<OPENFILENAMEW>() as u32,
         hwndOwner: unsafe { GetActiveWindow() },
         lpstrFilter: PCWSTR(filter.as_ptr()),
         lpstrFile: PWSTR(buf.as_mut_ptr()),
         nMaxFile: buf.len() as u32,
-        lpstrTitle: w!("記録ファイルを読み込む"),
+        lpstrTitle: PCWSTR(title.as_ptr()),
         Flags: OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR,
         ..Default::default()
     };
@@ -170,7 +205,7 @@ pub fn import_file() {
     }
     match std::fs::read(from_wide(&buf)) {
         Ok(d) => LOADED.with(|l| *l.borrow_mut() = Some(d)),
-        Err(e) => note(format!("読み込めなかった：{}", e)),
+        Err(e) => note(tf!("読み込めなかった：{}", "Could not load: {}", "无法读取：{}", e)),
     }
 }
 

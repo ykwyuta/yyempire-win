@@ -94,6 +94,10 @@ pub struct Gfx {
     brush: Option<ID2D1SolidColorBrush>,
     dwrite: IDWriteFactory,
     fonts: Vec<IDWriteTextFormat>,
+    /// 文字の計測結果（文・書体・幅 → 寸法）。書体を作り直したら捨てる
+    measure_cache: std::collections::HashMap<(String, u8, u32), f32>,
+    /// 文字の配置（文・書体・枠の幅と高さ → 配置）。書体を作り直したら捨てる
+    layout_cache: std::collections::HashMap<(String, u8, u32, u32), IDWriteTextLayout>,
     pub d2d_gen: u32,
     wbuf: Vec<u16>,
 }
@@ -114,6 +118,45 @@ fn compile(src: &str, entry: PCSTR, target: PCSTR) -> Result<ID3DBlob> {
         return Err(e);
     }
     Ok(code.unwrap())
+}
+
+/// いまの言語の書体で文字の書式を作る（日本語は游ゴシック、中国語は微軟雅黒、英語は Segoe UI）
+fn make_fonts(dwrite: &IDWriteFactory) -> Result<Vec<IDWriteTextFormat>> {
+    let (family, locale) = match crate::lang::lang() {
+        crate::lang::Lang::Ja => (w!("Yu Gothic UI"), w!("ja-jp")),
+        crate::lang::Lang::Zh => (w!("Microsoft YaHei UI"), w!("zh-cn")),
+        crate::lang::Lang::En => (w!("Segoe UI"), w!("en-us")),
+    };
+    let specs: [(f32, bool, bool); 7] = [
+        (12.0, false, false),
+        (14.0, false, false),
+        (14.0, true, false),
+        (18.0, false, true),
+        (20.0, true, true),
+        (40.0, true, true),
+        (15.0, true, true),
+    ];
+    let mut fonts = Vec::new();
+    for (size, center, bold) in specs {
+        unsafe {
+            let f = dwrite.CreateTextFormat(
+                family,
+                None,
+                if bold { DWRITE_FONT_WEIGHT_BOLD } else { DWRITE_FONT_WEIGHT_NORMAL },
+                DWRITE_FONT_STYLE_NORMAL,
+                DWRITE_FONT_STRETCH_NORMAL,
+                size,
+                locale,
+            )?;
+            if center {
+                f.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
+                f.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
+            }
+            f.SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP)?;
+            fonts.push(f);
+        }
+    }
+    Ok(fonts)
 }
 
 pub fn col(r: f32, g: f32, b: f32, a: f32) -> [f32; 4] {
@@ -275,33 +318,7 @@ impl Gfx {
 
             let d2d_factory: ID2D1Factory = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)?;
             let dwrite: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
-            let mut fonts = Vec::new();
-            let specs: [(f32, bool, bool); 7] = [
-                (12.0, false, false),
-                (14.0, false, false),
-                (14.0, true, false),
-                (18.0, false, true),
-                (20.0, true, true),
-                (40.0, true, true),
-                (15.0, true, true),
-            ];
-            for (size, center, bold) in specs {
-                let f = dwrite.CreateTextFormat(
-                    w!("Yu Gothic UI"),
-                    None,
-                    if bold { DWRITE_FONT_WEIGHT_BOLD } else { DWRITE_FONT_WEIGHT_NORMAL },
-                    DWRITE_FONT_STYLE_NORMAL,
-                    DWRITE_FONT_STRETCH_NORMAL,
-                    size,
-                    w!("ja-jp"),
-                )?;
-                if center {
-                    f.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
-                    f.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
-                }
-                f.SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP)?;
-                fonts.push(f);
-            }
+            let fonts = make_fonts(&dwrite)?;
 
             let mut g = Gfx {
                 device,
@@ -333,6 +350,8 @@ impl Gfx {
                 brush: None,
                 dwrite,
                 fonts,
+                measure_cache: std::collections::HashMap::new(),
+                layout_cache: std::collections::HashMap::new(),
                 d2d_gen: 0,
                 wbuf: Vec::new(),
             };
@@ -679,12 +698,45 @@ impl Gfx {
     }
 
     pub fn text(&mut self, s: &str, x: f32, y: f32, w: f32, h: f32, f: Font, c: [f32; 4]) {
-        self.wbuf.clear();
-        self.wbuf.extend(s.encode_utf16());
+        // 同じ文・書体・枠の配置は覚えておく（毎フレーム組み直すと重い）
+        let key = (s.to_string(), f as u8, w.to_bits(), h.to_bits());
+        let layout = match self.layout_cache.get(&key) {
+            Some(l) => Some(l.clone()),
+            None if w > 0.0 && h > 0.0 => {
+                let wb: Vec<u16> = s.encode_utf16().collect();
+                let l = unsafe { self.dwrite.CreateTextLayout(&wb, &self.fonts[f as usize], w, h) }.ok();
+                if let Some(l) = &l {
+                    if self.layout_cache.len() > 2048 {
+                        self.layout_cache.clear();
+                    }
+                    self.layout_cache.insert(key, l.clone());
+                }
+                l
+            }
+            None => None,
+        };
+        if layout.is_none() {
+            self.wbuf.clear();
+            self.wbuf.extend(s.encode_utf16());
+        }
         let (Some(rt), Some(b)) = (&self.d2d, self.set_brush(c)) else { return };
-        let fmt = &self.fonts[f as usize];
         unsafe {
-            rt.DrawText(&self.wbuf, fmt, &D2D_RECT_F { left: x, top: y, right: x + w, bottom: y + h }, b, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+            match &layout {
+                Some(l) => rt.DrawTextLayout(windows_numerics::Vector2 { X: x, Y: y }, l, b, D2D1_DRAW_TEXT_OPTIONS_NONE),
+                None => rt.DrawText(&self.wbuf, &self.fonts[f as usize], &D2D_RECT_F { left: x, top: y, right: x + w, bottom: y + h }, b, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL),
+            }
+        }
+    }
+
+    /// 言語が変わったら書体と窓の題名を作り直す
+    pub fn reload_fonts(&mut self) {
+        if let Ok(f) = make_fonts(&self.dwrite) {
+            self.fonts = f;
+        }
+        self.measure_cache.clear();
+        self.layout_cache.clear();
+        unsafe {
+            let _ = windows::Win32::UI::WindowsAndMessaging::SetWindowTextW(self.hwnd, &HSTRING::from(crate::lang::window_title()));
         }
     }
 
@@ -695,7 +747,29 @@ impl Gfx {
     }
 
     /// テキスト幅の計測
+    /// 計測を覚えておく（同じ文は測り直さない）。幅 0 は「1行の幅」を表す
+    fn cached(&mut self, s: &str, f: Font, width: f32, calc: impl FnOnce(&mut Self) -> f32) -> f32 {
+        let key = (s.to_string(), f as u8, width.to_bits());
+        if let Some(&v) = self.measure_cache.get(&key) {
+            return v;
+        }
+        let v = calc(self);
+        if self.measure_cache.len() > 4096 {
+            self.measure_cache.clear();
+        }
+        self.measure_cache.insert(key, v);
+        v
+    }
+
     pub fn measure(&mut self, s: &str, f: Font) -> f32 {
+        self.cached(s, f, 0.0, |g| g.measure_raw(s, f))
+    }
+
+    pub fn measure_h(&mut self, s: &str, f: Font, width: f32) -> f32 {
+        self.cached(s, f, width, |g| g.measure_h_raw(s, f, width))
+    }
+
+    fn measure_raw(&mut self, s: &str, f: Font) -> f32 {
         let wb: Vec<u16> = s.encode_utf16().collect();
         unsafe {
             if let Ok(layout) = self.dwrite.CreateTextLayout(&wb, &self.fonts[f as usize], 4000.0, 200.0) {
@@ -709,7 +783,7 @@ impl Gfx {
     }
 
     /// 幅 width で折り返したときの文章の高さ
-    pub fn measure_h(&mut self, s: &str, f: Font, width: f32) -> f32 {
+    fn measure_h_raw(&mut self, s: &str, f: Font, width: f32) -> f32 {
         let wb: Vec<u16> = s.encode_utf16().collect();
         unsafe {
             if let Ok(layout) = self.dwrite.CreateTextLayout(&wb, &self.fonts[f as usize], width, 4000.0) {
