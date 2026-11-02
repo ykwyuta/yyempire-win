@@ -107,6 +107,15 @@ fn blob_bytes(b: &ID3DBlob) -> &[u8] {
     unsafe { std::slice::from_raw_parts(b.GetBufferPointer() as *const u8, b.GetBufferSize()) }
 }
 
+/// 使っているグラフィックスの情報をログに書く
+fn log_adapter(device: &ID3D11Device) {
+    let desc = device.cast::<IDXGIDevice>().and_then(|d| unsafe { d.GetAdapter()?.GetDesc() });
+    if let Ok(d) = desc {
+        let n = d.Description.iter().position(|&c| c == 0).unwrap_or(d.Description.len());
+        crate::crashlog::line(&format!("[INFO] GPU {} VRAM {}MB 機能レベル {:?}", String::from_utf16_lossy(&d.Description[..n]), d.DedicatedVideoMemory / (1024 * 1024), unsafe { device.GetFeatureLevel() }));
+    }
+}
+
 fn compile(src: &str, entry: PCSTR, target: PCSTR) -> Result<ID3DBlob> {
     let mut code = None;
     let mut err = None;
@@ -210,6 +219,7 @@ impl Gfx {
             let device: ID3D11Device = device.unwrap();
             let ctx: ID3D11DeviceContext = ctx.unwrap();
             let swapchain: IDXGISwapChain = swapchain.unwrap();
+            log_adapter(&device);
 
             let vsb = compile(SHADER, s!("vs_main"), s!("vs_4_0"))?;
             let psc = compile(SHADER, s!("ps_color"), s!("ps_4_0"))?;
@@ -438,12 +448,17 @@ impl Gfx {
         unsafe {
             self.ctx.OMSetRenderTargets(None, None);
             self.ctx.Flush();
-            if self.swapchain.ResizeBuffers(0, w, h, DXGI_FORMAT_UNKNOWN, DXGI_SWAP_CHAIN_FLAG(0)).is_ok() {
-                self.pw = w;
-                self.ph = h;
+            match self.swapchain.ResizeBuffers(0, w, h, DXGI_FORMAT_UNKNOWN, DXGI_SWAP_CHAIN_FLAG(0)) {
+                Ok(()) => {
+                    self.pw = w;
+                    self.ph = h;
+                }
+                Err(e) => self.warn_device("ResizeBuffers", &e),
             }
         }
-        let _ = self.create_targets();
+        if let Err(e) = self.create_targets() {
+            self.warn_device("create_targets", &e);
+        }
         self.update_scale();
     }
 
@@ -636,9 +651,12 @@ impl Gfx {
         if let Some(rt) = &self.d2d {
             unsafe {
                 if let Err(e) = rt.EndDraw(None, None) {
+                    self.warn_device("EndDraw", &e);
                     if e.code() == D2DERR_RECREATE_TARGET {
                         self.d2d = None;
-                        let _ = self.create_targets();
+                        if let Err(e) = self.create_targets() {
+                            self.warn_device("create_targets", &e);
+                        }
                     }
                 }
             }
@@ -860,7 +878,15 @@ impl Gfx {
 
     pub fn present(&mut self) {
         unsafe {
-            let _ = self.swapchain.Present(1, DXGI_PRESENT(0));
+            if let Err(e) = self.swapchain.Present(1, DXGI_PRESENT(0)).ok() {
+                self.warn_device("Present", &e);
+            }
         }
+    }
+
+    /// 描画の失敗をログに書く（デバイス消失ならその理由も）
+    fn warn_device(&self, what: &'static str, e: &Error) {
+        let reason = unsafe { self.device.GetDeviceRemovedReason() };
+        crate::crashlog::warn_limited(what, &format!("{} デバイス: {:?}", e, reason));
     }
 }

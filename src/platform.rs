@@ -58,10 +58,15 @@ pub fn save_lang(l: crate::lang::Lang) {
     let _ = write_atomic(&settings_path(), format!("lang={}\n", l.code()).as_bytes());
 }
 
+/// このゲームのデータの置き場所（%APPDATA%\\yyempire）
+pub fn app_dir() -> PathBuf {
+    let base = std::env::var_os("APPDATA").map(PathBuf::from).or_else(|| std::env::current_exe().ok().and_then(|p| p.parent().map(Path::to_path_buf))).unwrap_or_else(|| PathBuf::from("."));
+    base.join("yyempire")
+}
+
 /// 記録の置き場所（無ければ作る）
 fn save_dir() -> PathBuf {
-    let base = std::env::var_os("APPDATA").map(PathBuf::from).or_else(|| std::env::current_exe().ok().and_then(|p| p.parent().map(Path::to_path_buf))).unwrap_or_else(|| PathBuf::from("."));
-    let d = base.join("yyempire").join("saves");
+    let d = app_dir().join("saves");
     let _ = std::fs::create_dir_all(&d);
     d
 }

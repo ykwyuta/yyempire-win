@@ -77,10 +77,32 @@ F5（または画面右上の「記録 F5」）で記録画面を開く。3枠�
 | `src/game/market.rs` | 交易画面（税率・市場・西域の道・部族と傭兵）と隊商の描画 |
 | `src/game/save.rs`・`src/world/save.rs`・`src/save.rs` | 記録の画面・自動記録、World の読み書き、外部クレートなしのバイナリ形式 |
 | `src/platform.rs` | 記録ファイルの置き場所（%APPDATA%）とファイルダイアログ |
+| `src/crashlog.rs` | 異常終了の調査ログ（パニック・例外・応答なし・メモリの推移） |
+
+## 異常終了の調査
+
+起動ごとに `%APPDATA%\yyempire\logs\run-日時-pid.log` を作り、1行ずつディスクへ書く（新しいものを30個残す）。パニックで落ちたときは、ログの場所を知らせる窓を出す。
+
+| 印 | 意味 |
+|---|---|
+| `[PANIC]` | Rust のパニック。文面・バックトレース・直前の状態と操作を書き、対局中なら同名の `.yysav` も残す（「ファイルから読み込む」で読めるが、処理の途中の状態） |
+| `[CRASH]` | アクセス違反・スタック溢れなど。例外コード・モジュールと位置・直前の状態と操作を書き、同名の `.dmp` を残す（新しいものを5個） |
+| `[PREV]` | 前回のログに `[END] 正常終了` がない。abort・メモリ不足・強制終了・電源断は、ここで初めて分かる |
+| `[STALL]` | 15秒以上フレームが進まない（ファイルダイアログを開いている間やスリープ復帰でも出る） |
+| `[STAT]` | 1分ごとのフレーム数・メモリ使用量・ゲームの状態（メモリ不足の兆候を追う） |
+| `[WARN]` | 描画の失敗（Present・ResizeBuffers など。デバイス消失の理由も書く） |
+
+バックトレースとダンプの行番号は exe と同じ場所の `yyempire.pdb` から読む（CI の成果物にも含める）。ログの1行目にあるコミットのソースと突き合わせる。
+
+ログの仕組みそのものは `YY_CRASH_TEST` で確かめられる（`panic`・`wndproc`・`av`・`stack`・`abort`・`hang`）：
+
+```
+$env:YY_CRASH_TEST="panic"; cargo run --release
+```
 
 ## CI
 
-GitHub Actions（`.github/workflows/build.yml`）が push・プルリクエストのたびに Windows でリリースビルドとテストを行い、`yyempire.exe` を成果物（yyempire-windows）として保存する。Actions 画面の「Run workflow」から手動でも実行できる。
+GitHub Actions（`.github/workflows/build.yml`）が push・プルリクエストのたびに Windows でリリースビルドとテストを行い、`yyempire.exe` と `yyempire.pdb` を成果物（yyempire-windows）として保存する。Actions 画面の「Run workflow」から手動でも実行できる。
 
 ## テスト
 

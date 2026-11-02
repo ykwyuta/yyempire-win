@@ -32,6 +32,11 @@ fn write_res_header(out: &mut Vec<u8>, data_size: u32, res_type: u16, res_id: u1
 
 fn main() {
     println!("cargo:rerun-if-changed=assets/app_icon.ico");
+    // ログに書く版（クラッシュの行番号をソースと突き合わせるため）
+    println!("cargo:rerun-if-changed=.git/logs/HEAD");
+    let git = std::process::Command::new("git").args(["rev-parse", "--short", "HEAD"]).output();
+    let hash = git.ok().filter(|o| o.status.success()).map_or("unknown".to_string(), |o| String::from_utf8_lossy(&o.stdout).trim().to_string());
+    println!("cargo:rustc-env=YY_GIT_HASH={}", hash);
     let ico = fs::read("assets/app_icon.ico").expect("failed to read assets/app_icon.ico");
     let count = u16::from_le_bytes([ico[4], ico[5]]) as usize;
 

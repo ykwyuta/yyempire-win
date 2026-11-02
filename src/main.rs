@@ -5,6 +5,7 @@
 mod lang;
 mod ai;
 mod art;
+mod crashlog;
 mod game;
 mod geo;
 mod gfx;
@@ -117,7 +118,22 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
     }
 }
 
-fn main() -> Result<()> {
+fn main() {
+    crashlog::init();
+    match std::panic::catch_unwind(run) {
+        Ok(Ok(())) => crashlog::clean_exit(),
+        Ok(Err(e)) => {
+            crashlog::report_failure(&format!("{:?}", e));
+            std::process::exit(1);
+        }
+        Err(_) => {
+            crashlog::report_failure("パニック");
+            std::process::exit(101);
+        }
+    }
+}
+
+fn run() -> Result<()> {
     unsafe {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         lang::set_lang(platform::initial_lang());
@@ -164,6 +180,8 @@ fn main() -> Result<()> {
         let gfx = gfx::Gfx::new(hwnd, (cr.right - cr.left).max(1) as u32, (cr.bottom - cr.top).max(1) as u32)?;
         let mut game = game::Game::new(gfx);
         let mut last = std::time::Instant::now();
+        let mut state_at = last;
+        crashlog::set_state(game.state_text());
         let mut msg = MSG::default();
         'outer: loop {
             while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
@@ -174,12 +192,28 @@ fn main() -> Result<()> {
                 DispatchMessageW(&msg);
             }
             let evs: Vec<Ev> = EVENTS.with(|v| std::mem::take(&mut *v.borrow_mut()));
+            for e in evs.iter().filter(|e| !matches!(e, Ev::MouseMove(..))) {
+                crashlog::crumb(format!("{:?}", e));
+            }
             let now = std::time::Instant::now();
             let dt = (now - last).as_secs_f32().min(0.1);
             last = now;
+            if (now - state_at).as_secs() >= 1 {
+                state_at = now;
+                crashlog::set_state(game.state_text());
+            }
             let focused = GetForegroundWindow() == hwnd;
-            if game.frame(&evs, dt, focused) {
-                break;
+            let done = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                crashlog::tick();
+                game.frame(&evs, dt, focused)
+            }));
+            match done {
+                Ok(true) => break,
+                Ok(false) => {}
+                Err(p) => {
+                    game.crash_save();
+                    std::panic::resume_unwind(p);
+                }
             }
             if IsIconic(hwnd).as_bool() {
                 std::thread::sleep(std::time::Duration::from_millis(30));

@@ -7,6 +7,7 @@ description = "春秋戦国リアルタイムストラテジー (Rust + Direct3D
 [dependencies.windows]
 version = "0.62.2"
 features = [
+    "Wdk_System_SystemServices",
     "Win32_Foundation",
     "Win32_Graphics_Direct3D",
     "Win32_Graphics_Direct3D_Fxc",
@@ -24,6 +25,12 @@ features = [
     "Win32_UI_Controls_Dialogs",
     "Win32_System_SystemInformation",
     "Win32_Globalization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_Kernel",
+    "Win32_System_Memory",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Threading",
 ]
 
 [dependencies]
@@ -34,4 +41,5 @@ opt-level = 1
 
 [profile.release]
 opt-level = 3
-debug = false
+# バックトレースとダンプで行番号が分かるように（exe と同じ場所の .pdb から読む）
+debug = "line-tables-only"

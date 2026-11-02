@@ -30,4 +30,5 @@ jobs:
           name: yyempire-windows
           path: |
             target/release/yyempire.exe
+            target/release/yyempire.pdb
             README.md

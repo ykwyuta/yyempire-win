@@ -1737,6 +1737,7 @@ impl Game {
     }
 
     fn do_act(&mut self, a: Act) {
+        crate::crashlog::crumb(format!("操作 {:?} 選択{}", a, self.sel.len()));
         // 部隊への指示（移動・攻撃以外）でも時間を再開する
         if matches!(a, Act::Upgrade | Act::Convert | Act::Stop | Act::WorkersAuto | Act::ArmyDefend | Act::Demolish) {
             self.cmd_pause = false;
@@ -2776,7 +2777,7 @@ impl Game {
             self.gfx.text_shadow(label, tx0 + 2.0, y0 + 2.0, tw + 24.0, bh * 0.52, Font::Normal, tc);
             // 小見出しが入りきらなければ、アイコンの下まで左へ寄せる
             let sw = self.gfx.measure(sub, Font::Small);
-            let sx = (x1 - 4.0 - sw).clamp(x0 + 4.0, tx0 + 2.0);
+            let sx = (x1 - 4.0 - sw).min(tx0 + 2.0).max(x0 + 4.0);
             self.gfx.text(sub, sx, y0 + bh * 0.53, x1 - sx, bh * 0.45, Font::Small, [tc[0] * 0.92, tc[1] * 0.86, tc[2] * 0.68, 1.0]);
         }
         if key >= 0x41 && key <= 0x5A {
