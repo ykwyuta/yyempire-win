@@ -88,6 +88,7 @@ enum Act {
     Upgrade,
     Convert,
     Stop,
+    Explore,
     AttackMove,
     SelectAllWorkers,
     SelectAllMilitary,
@@ -586,6 +587,19 @@ impl Game {
             }
         }
         let pl = self.world.player;
+        let mut undiscovered = Vec::new();
+        if self.fog_active() && self.world.units.iter().any(|u| {
+            u.alive && u.nation as usize == pl && matches!(u.order, Order::Explore(_))
+        }) {
+            for b in &self.world.blds {
+                if b.alive && b.kind.city() && b.nation as usize != pl {
+                    let (x, y) = b.center().tile();
+                    if Map::inb(x, y) && self.fog[Map::idx(x, y)] == 0 {
+                        undiscovered.push((Map::idx(x, y), b.nation as usize));
+                    }
+                }
+            }
+        }
         for u in self.world.units.iter() {
             if u.alive && u.nation as usize == pl {
                 let (x, y) = u.pos.tile();
@@ -598,6 +612,16 @@ impl Game {
                 let r = if b.kind.city() { b.kind.radius() as i32 + 3 } else { 5 };
                 Self::reveal(&mut self.fog, x, y, r, 2);
             }
+        }
+        let mut discoveries = [0u32; NATIONS.len()];
+        for (tile, nation) in undiscovered {
+            if self.fog[tile] == 2 {
+                discoveries[nation] += 1;
+            }
+        }
+        for (nation, count) in discoveries.into_iter().enumerate().filter(|&(_, count)| count != 0) {
+            let name = crate::lang::tx(self.world.nations[nation].name);
+            self.world.push_msg(tf!("{}の城邑を{}か所発見した", "Discovered cities of {} ({})", "发现{}的城邑（{}处）", name, count), [0.7, 0.9, 1.0]);
         }
         let fog_c = [0.04, 0.05, 0.07];
         for (px, &f) in self.fog_px.iter_mut().zip(self.fog.iter()) {
@@ -741,7 +765,8 @@ impl Game {
             self.scroll(dt, focused);
             self.update_cmd_pause();
             self.world.prune_peace_asks();
-            if !self.paused && !self.cmd_hold() && self.world.game_over.is_none() && !self.show_help && !self.peace_pending() {
+            let running = !self.paused && !self.cmd_hold() && self.world.game_over.is_none() && !self.show_help && !self.peace_pending();
+            if running {
                 self.acc += dt * self.speed as f32;
                 let mut steps = 0;
                 while self.acc >= DT && steps < 16 {
@@ -759,7 +784,11 @@ impl Game {
                 }
             }
             self.autosave_tick();
+            let fog_ver = self.fog_ver;
             self.update_fog(dt);
+            if running && self.fog_ver != fog_ver && self.world.game_over.is_none() {
+                self.world.plan_exploration(&self.fog);
+            }
             self.update_tutorial(dt);
             let pl = self.world.player;
             let sel: Vec<Handle> = self.sel.iter().copied().filter(|&h| self.world.unit(h).map_or(false, |u| u.nation as usize == pl || self.seen(u.pos))).collect();
@@ -1078,6 +1107,10 @@ impl Game {
                 }
             }
             Ev::Key(k, down) => {
+                // 探索ボタンは中止と切り替わるので、押しっぱなしでは一度だけ反応する。
+                if k == 'X' as u32 && down && self.keys[k as usize] {
+                    return false;
+                }
                 if (k as usize) < 256 {
                     self.keys[k as usize] = down;
                 }
@@ -1973,6 +2006,11 @@ impl Game {
                 if let Some(e) = err {
                     self.notice(e);
                 }
+            }
+            Act::Explore => {
+                let hs = self.own_sel();
+                self.world.order_explore(&hs);
+                self.mode = Mode::Normal;
             }
             Act::Stop => {
                 for h in self.own_sel() {
@@ -3496,6 +3534,7 @@ impl Game {
     fn order_text(&self, u: &Unit) -> &'static str {
         match u.order {
             Order::Idle => t!("待機中", "Idle", "待命"),
+            Order::Explore(_) => t!("探索中", "Exploring", "探索中"),
             Order::Forestry { .. } => t!("植林担当", "Forestry", "负责植林"),
             Order::Move(_) => t!("移動中", "Moving", "移动中"),
             Order::AttackMove(_) => t!("進軍中", "Advancing", "进军中"),
@@ -3830,9 +3869,19 @@ impl Game {
             let any_worker = own.iter().any(|&h| self.world.unit(h).unwrap().kind == UnitKind::Worker);
             let any_mil = own.iter().any(|&h| self.world.unit(h).unwrap().kind.military());
             if any_worker && !(self.discard_pending && can_discard) {
-                let (_, _, plant_right, _) = pos(1);
+                let (_, _, plant_right, _) = pos(0);
                 self.add_button(x, utility_y, plant_right, utility_bottom, t!("植林区域", "Forestry region", "植林区域"), "", 0, true, Act::PlantForest,
                     t!("範囲を指定して民を配置。1マスごとに糧20で植え、30秒世話をすると森になります。既存の枠を選ぶと民を追加できます。", "Assign workers to a region. Each tile costs 20 food to plant and becomes forest after 30 seconds of tending. Click an existing region to assign more workers.", "划定区域并安排民。每格耗粮20，照料30秒后长成森林。点击已有区域可增加林工。"));
+            }
+            if !(self.discard_pending && can_discard) {
+                let (explore_x, _, explore_right, _) = pos(1);
+                if own.iter().all(|&h| self.world.unit(h).is_some_and(|u| matches!(u.order, Order::Explore(_)))) {
+                    self.add_button(explore_x, utility_y, explore_right, utility_bottom, t!("探索中止", "End scouting", "停止探索"), "", 'X' as u32, true, Act::Stop,
+                        t!("選択したユニットの探索を中止する。", "Stop the selected units from scouting.", "停止所选单位的探索。"));
+                } else {
+                    self.add_button(explore_x, utility_y, explore_right, utility_bottom, t!("探索", "Explore", "探索"), "", 'X' as u32, true, Act::Explore,
+                        t!("選択したユニットが手分けして未踏の地を探索し、他勢力の邑を発見する。", "Send the selected units to scout different areas of unexplored land and discover other factions’ towns.", "所选单位将分头探索未知区域，寻找其他势力的城邑。"));
+                }
             }
             let mut i = 0;
             if any_worker {
@@ -4167,8 +4216,8 @@ impl Game {
 　Ctrl+数字：部隊登録　数字：部隊呼び出し　.：待機中の民　Home：国都へ
 　ホイール：拡大縮小　中ボタンドラッグ・矢印キー・画面端：スクロール　ミニマップクリック：移動
 　Space：一時停止　＋／－：速度　Esc：取り消し　F5：記録（セーブ・ロード）　F11：全画面　Ctrl＋＋／Ctrl＋−：文字の大きさ",
-            "■ Goal  Unify the realm by 221 BC. Time flows the same for every state (in the Spring and Autumn period 1 year = 16 s; in the Warring States time slows to 1 year = 32 s), moving from the Spring and Autumn period (until 453 BC) into the Warring States. Every state gets the same era bonus; no state advances alone.\n\n■ Resources  Food (farm fields), wood (cut forests), bronze (mine). Workers carry them to the capital or a town. Cities also pay a little tax.\n\n■ Units  The number you can field is limited (more cities raise it). Instead, Train / Educate raises each unit's power (capped per era; the cost is paid mostly from whichever of food, wood and bronze you have most of, so nothing goes to waste). Soldiers eat food just by existing (upkeep); without food they weaken. Soldiers can be disbanded into workers and workers drafted as halberdiers, but power drops to 2/3.\n  Counters: halberdier > chariot (cavalry) > crossbowman > halberdier.\n\n■ Diplomacy  F2 opens Diplomacy. You must declare war before attacking. Capture a city and it becomes yours. A state that loses all its cities falls.\n■ Peace offers  When an enemy offers peace (including when a coalition disbands or a historical truce occurs), answer Accept (Y) or Refuse (N). Time stops until you answer. Refuse to keep fighting.\n\n■ The Hegemon's Call (Spring and Autumn)  Repeated wars and conquests raise the lords' alarm. At 100 the strongest state calls on the lords and the neighbors attack together for 15 years.\n■ Grand Alliance (Warring States)  When one state grows far stronger than the rest, its neighbors ally and attack together for 15 years.\n■ Partition of Jin  At the start of the Warring States, Jin splits into Han, Zhao and Wei.\n■ Fallen states  When a state falls, its population allowance (4, plus whatever it had received) is shared among the surviving states, the conqueror first. It is added on top of the worker and soldier limits set by your cities (normally 25 at most).\n■ Forts  With only workers selected, press Fort (R) to build one (food 300, wood 400, bronze 300). It shoots enemy soldiers that come near (range 9). You may have 1 + cities ÷ 2 of them (6 at most). A good use for surplus resources.\n■ Historical events  In the right year, heroes, philosophers and statesmen appear and strengthen their state (production or military up for some years), while revolts and usurpations cost soldiers and stores and change the ruling house. Events of fallen states do not happen. See the records and each state's house and figures in the Annals (F3, or from Diplomacy).\n■ Descent of the Supreme Deity  If the realm is not unified by 221 BC, the year it was unified in history, the Supreme Deity descends upon Qin (Qin returns even if destroyed). None can resist the Deity's army; within 10 years China is unified under Qin and the game ends.\n■ Heroic Spirits mode (chosen on the title screen, off by default)  Select workers and press Summon Spirit (H) to sacrifice them and summon a spirit from the Three Sovereigns to the Warring States, across eras and states. A spirit has 1.1–3.0 times the total power of the sacrifice (it depends on the spirit). Each state may have one spirit at a time, and a spirit never appears for two states. Other states summon too. Only spirits can harm the Deity's soldiers, and cities near a spirit cannot be taken by the Deity's army. If your territory is larger than the Deity's Qin 10 years after the Descent, you win.\n■ National traits  Each state has historical traits (see the title screen and the Annals). Zhou cannot fall in the Spring and Autumn period (an attacker withdraws from its last city). Qin's cities are hard to take behind its passes, Zhao's cavalry is strong after adopting Hu dress (from 307 BC), Han has fine crossbows, Wei its armored infantry, and merchants flock to Qi, Song and Zheng.\n■ Trade (F4)  Merchants who belong to no state travel the land and gather in states with high production. They pay tax (coin) just by passing through your land, and their number grows with the total production of the Central Plains. Lighter taxes draw more merchants. Coin buys food, wood and bronze at the market. Western merchants come only to the lands at the end of the Hexi Corridor, the Steppe Road and the Shu–India Road (Guanzhong, Hedong, Luoyi; the northern frontier; Shu and Ba) and pay a lot of tax.\n■ Hill and steppe peoples  The Quanrong, Shanrong, Linhu, Donghu, Xiongnu, Baiyue and others are not states. They appear in their historical eras, raid weakly defended states (taking a city, they seize its stores and leave) or come to trade horses and furs. Hire them as mercenaries with coin on the Trade screen; while hired they will not attack you.\n■ Time stops while commanding  Selecting your own units stops time; it resumes when you give an order (move, attack, gather, build...) or clear the selection. It also stops while drag-selecting.\n■ Fog of war  You see only around your own workers, soldiers and buildings. Land you have seen stays dimly visible with its terrain and cities, but not enemy soldiers. The capitals of all lords are known from the start.\n\n■ Controls\nSelect at least two military units and open Corps (J) to form a corps. Recall it by its button, then press A and pick an advance destination, or press D to intercept intruders or rally for defense.\n  Left click: select   Drag: box select   Double click: select all of a type (completed barracks on screen can train together)   Shift: add to selection\n  Right click: move / attack / gather (forest, mine, field) / help build   Right click with a building selected: rally point\n  A: attack-move   S: stop   T: train / educate   C: convert soldier ⇔ worker   Q/W/E: build / train\n  Hold Ctrl while placing buildings: reserve builds (keep placing). The selected workers finish their current build, then build in the order placed (numbers show the order)\n  Ctrl+number: save group   Number: recall group   .: idle worker   Home: go to capital\n  Wheel: zoom   Middle drag / arrow keys / screen edge: scroll   Minimap click: jump\n  Space: pause   + / -: speed   Esc: cancel   F5: save / load   F11: fullscreen   Ctrl++ / Ctrl+−: text size",
-            "■ 目标　在公元前221年之前统一天下。时间对所有国家同样流逝（春秋时1年＝16秒，战国时时间放慢为1年＝32秒），由春秋时代（至前453年）进入战国时代。各国享有相同的时代加成，不会只有部分国家文明领先。\n\n■ 资源　粮（耕田）、木（伐木）、铜（采铜矿）。由民采集并运往都、邑。城邑也会缴纳少量税收。\n\n■ 单位　可指挥的数量有上限（随城邑数增加）。作为补偿，可通过“训练／教化”提升每个单位的能力（各时代有上限。费用优先从粮、木、铜中储量较多者支付，任何资源都不会浪费）。军事单位只要存在就会消耗粮（维持费），粮尽则士兵逐渐衰弱。士兵可解散为民，民可征为戈兵，但能力降为2/3。\n　相克关系：戈兵＞战车（骑兵）＞弩兵＞戈兵。\n\n■ 外交　按 F2 打开外交画面。不宣战就不能攻击他国。攻下城邑即归我方所有。失去全部城邑的国家灭亡。\n■ 议和请求　交战国提出议和（包括联军解散、史实休战）时，以“接受（Y）”或“拒绝（N）”回应。回应之前时间停止。拒绝即可继续交战。\n\n■ 霸主号召（春秋）　频繁宣战或攻城会提高“诸侯警戒”，达到100时最强之国号召诸侯，周边各国在15年内一齐来攻。\n■ 合纵军（战国）　出现一枝独秀的强国时，周边各国合纵，在15年内一齐进攻。\n■ 三家分晋　战国时代到来时，晋分裂为韩、赵、魏。\n■ 灭亡与人口上限　国家灭亡时，其民与兵的上限（4，加上此前分得的部分）会分给存活的国家，攻灭者优先。分得的部分加在由城邑数决定的上限（最多25）之上。\n■ 要塞　只选中民时，可用“要塞（R）”修筑（粮300・木400・铜300）。射击靠近的敌兵（射程9）。数量上限为“1＋城邑数÷2”（最多6）。可消耗多余资源。\n■ 史实事件　到了史实年份，英雄、诸子百家、政治家会出现并增强国力（一定年数内生产或武力提升）；叛乱与篡位则会损失士兵与储备，君主家（国姓）随之更替。若该国已灭亡则不会发生。记录及各国君主家、人物可在“史记”（F3，或从外交画面）查看。\n■ 上帝降临　若未能在史实上中华统一的公元前221年之前统一天下，上帝将降临于秦（即使秦已灭亡也会复活）。上帝之军不可抗拒，10年之内中华将归于秦，游戏结束。\n■ 英灵模式（在标题画面选择，默认关闭）　选中民后按“召唤英灵”（H），即可献祭所选的民，跨越时代与国界召唤自三皇五帝至春秋战国的英灵。英灵能力为祭品能力总和的1.1〜3.0倍（因英灵而异）。每国同时只能拥有一位英灵，同一英灵不会出现在两国。他国也会召唤。只有英灵能伤及上帝之兵，英灵附近的城邑也不会被上帝之军夺走。上帝降临10年后，若我国版图大于上帝之秦即获胜。\n■ 国家特点　各国拥有基于史实的特点（可在标题画面与史记中查看）。周在春秋时代不会灭亡（即使最后的城邑被攻破，攻方也会撤兵）。秦有关中之险，城池坚固；赵推行胡服骑射（前307年起）后骑兵强大；韩有强弩，魏有武卒；齐、宋、郑商人云集，等等。\n■ 贸易（F4）　不属于任何国家的商人周游列国，生产力越高的国家聚集越多。商人只要途经领内就会缴税（钱），其数量与中原整体生产量成正比。税率越轻，商人越多。钱可在市场换成粮、木、铜。西域商人只会来到河西走廊、草原之路、蜀身毒道尽头的地区（关中、河东、洛邑，北方边地，蜀、巴），并缴纳大量税收。\n■ 山地与游牧民　犬戎、山戎、林胡、东胡、匈奴、百越等不是国家。他们按时代出现，或来劫掠防守薄弱的国家（攻下城邑后夺取储备撤走），或来贩卖马匹、毛皮。可在贸易画面用钱雇其为佣兵，受雇期间不会袭击雇主。\n■ 指挥中时间停止　选中己方单位时时间停止，下达移动、攻击、采集、建造等命令（或取消选择）后继续。框选拖动时也会停止。\n■ 战争迷雾　只能看到己方民、兵、建筑周围。看过的土地会暗淡地保留，可见地形与城池，但看不到敌兵。诸侯都城的位置从一开始就已知。\n\n■ 操作\n选中至少两个己方军事单位，从“军团”（J）组建。点击军团编号召回，按 A 指定进军目标，按 D 迎击入侵者或集结防守。\n軍事ユニットを2体以上選択し、「軍団」（J）から編成。軍団番号で呼び出し、Aで進軍先を指定、Dで領内の迎撃・防衛集結を命じる。\n　左键：选择　拖动：框选　双击：选择全部同类（可选中屏幕内已完工的兵营并批量生产）　Shift：追加选择\n　右键：移动／攻击／采集（森林・铜矿・田）／协助建造　选中建筑时右键：集结点\n　A：进军（攻击移动）　S：停止　T：训练・教化　C：兵⇔民转换　Q/W/E：建造・训练\n　按住 Ctrl 放置建筑：预约建造（可连续放置）。所选的民完成当前建造后，按放置顺序依次建造（建造地显示顺序）\n　Ctrl+数字：编队　数字：调出编队　.：闲置的民　Home：回国都\n　滚轮：缩放　中键拖动・方向键・画面边缘：滚动　点击小地图：移动\n　Space：暂停　＋／－：速度　Esc：取消　F5：存档（保存・读取）　F11：全屏　Ctrl＋＋／Ctrl＋−：文字大小"
+            "■ Goal  Unify the realm by 221 BC. Time flows the same for every state (in the Spring and Autumn period 1 year = 16 s; in the Warring States time slows to 1 year = 32 s), moving from the Spring and Autumn period (until 453 BC) into the Warring States. Every state gets the same era bonus; no state advances alone.ユニットを選択して「探索」（X）を押すと、手分けして未踏の地を調べる。\n\n■ Resources  Food (farm fields), wood (cut forests), bronze (mine). Workers carry them to the capital or a town. Cities also pay a little tax.\n\n■ Units  The number you can field is limited (more cities raise it). Instead, Train / Educate raises each unit's power (capped per era; the cost is paid mostly from whichever of food, wood and bronze you have most of, so nothing goes to waste). Soldiers eat food just by existing (upkeep); without food they weaken. Soldiers can be disbanded into workers and workers drafted as halberdiers, but power drops to 2/3.\n  Counters: halberdier > chariot (cavalry) > crossbowman > halberdier.\n\n■ Diplomacy  F2 opens Diplomacy. You must declare war before attacking. Capture a city and it becomes yours. A state that loses all its cities falls.\n■ Peace offers  When an enemy offers peace (including when a coalition disbands or a historical truce occurs), answer Accept (Y) or Refuse (N). Time stops until you answer. Refuse to keep fighting.\n\n■ The Hegemon's Call (Spring and Autumn)  Repeated wars and conquests raise the lords' alarm. At 100 the strongest state calls on the lords and the neighbors attack together for 15 years.\n■ Grand Alliance (Warring States)  When one state grows far stronger than the rest, its neighbors ally and attack together for 15 years.\n■ Partition of Jin  At the start of the Warring States, Jin splits into Han, Zhao and Wei.\n■ Fallen states  When a state falls, its population allowance (4, plus whatever it had received) is shared among the surviving states, the conqueror first. It is added on top of the worker and soldier limits set by your cities (normally 25 at most).\n■ Forts  With only workers selected, press Fort (R) to build one (food 300, wood 400, bronze 300). It shoots enemy soldiers that come near (range 9). You may have 1 + cities ÷ 2 of them (6 at most). A good use for surplus resources.\n■ Historical events  In the right year, heroes, philosophers and statesmen appear and strengthen their state (production or military up for some years), while revolts and usurpations cost soldiers and stores and change the ruling house. Events of fallen states do not happen. See the records and each state's house and figures in the Annals (F3, or from Diplomacy).\n■ Descent of the Supreme Deity  If the realm is not unified by 221 BC, the year it was unified in history, the Supreme Deity descends upon Qin (Qin returns even if destroyed). None can resist the Deity's army; within 10 years China is unified under Qin and the game ends.\n■ Heroic Spirits mode (chosen on the title screen, off by default)  Select workers and press Summon Spirit (H) to sacrifice them and summon a spirit from the Three Sovereigns to the Warring States, across eras and states. A spirit has 1.1–3.0 times the total power of the sacrifice (it depends on the spirit). Each state may have one spirit at a time, and a spirit never appears for two states. Other states summon too. Only spirits can harm the Deity's soldiers, and cities near a spirit cannot be taken by the Deity's army. If your territory is larger than the Deity's Qin 10 years after the Descent, you win.\n■ National traits  Each state has historical traits (see the title screen and the Annals). Zhou cannot fall in the Spring and Autumn period (an attacker withdraws from its last city). Qin's cities are hard to take behind its passes, Zhao's cavalry is strong after adopting Hu dress (from 307 BC), Han has fine crossbows, Wei its armored infantry, and merchants flock to Qi, Song and Zheng.\n■ Trade (F4)  Merchants who belong to no state travel the land and gather in states with high production. They pay tax (coin) just by passing through your land, and their number grows with the total production of the Central Plains. Lighter taxes draw more merchants. Coin buys food, wood and bronze at the market. Western merchants come only to the lands at the end of the Hexi Corridor, the Steppe Road and the Shu–India Road (Guanzhong, Hedong, Luoyi; the northern frontier; Shu and Ba) and pay a lot of tax.\n■ Hill and steppe peoples  The Quanrong, Shanrong, Linhu, Donghu, Xiongnu, Baiyue and others are not states. They appear in their historical eras, raid weakly defended states (taking a city, they seize its stores and leave) or come to trade horses and furs. Hire them as mercenaries with coin on the Trade screen; while hired they will not attack you.\n■ Time stops while commanding  Selecting your own units stops time; it resumes when you give an order (move, attack, gather, build...) or clear the selection. It also stops while drag-selecting.\n■ Fog of war  You see only around your own workers, soldiers and buildings. Land you have seen stays dimly visible with its terrain and cities, but not enemy soldiers. The capitals of all lords are known from the start. Select units and press Explore (X) to scout different areas of unexplored land.\n\n■ Controls\nSelect at least two military units and open Corps (J) to form a corps. Recall it by its button, then press A and pick an advance destination, or press D to intercept intruders or rally for defense.\n  Left click: select   Drag: box select   Double click: select all of a type (completed barracks on screen can train together)   Shift: add to selection\n  Right click: move / attack / gather (forest, mine, field) / help build   Right click with a building selected: rally point\n  A: attack-move   S: stop   T: train / educate   C: convert soldier ⇔ worker   Q/W/E: build / train\n  Hold Ctrl while placing buildings: reserve builds (keep placing). The selected workers finish their current build, then build in the order placed (numbers show the order)\n  Ctrl+number: save group   Number: recall group   .: idle worker   Home: go to capital\n  Wheel: zoom   Middle drag / arrow keys / screen edge: scroll   Minimap click: jump\n  Space: pause   + / -: speed   Esc: cancel   F5: save / load   F11: fullscreen   Ctrl++ / Ctrl+−: text size",
+            "■ 目标　在公元前221年之前统一天下。时间对所有国家同样流逝（春秋时1年＝16秒，战国时时间放慢为1年＝32秒），由春秋时代（至前453年）进入战国时代。各国享有相同的时代加成，不会只有部分国家文明领先。\n\n■ 资源　粮（耕田）、木（伐木）、铜（采铜矿）。由民采集并运往都、邑。城邑也会缴纳少量税收。\n\n■ 单位　可指挥的数量有上限（随城邑数增加）。作为补偿，可通过“训练／教化”提升每个单位的能力（各时代有上限。费用优先从粮、木、铜中储量较多者支付，任何资源都不会浪费）。军事单位只要存在就会消耗粮（维持费），粮尽则士兵逐渐衰弱。士兵可解散为民，民可征为戈兵，但能力降为2/3。\n　相克关系：戈兵＞战车（骑兵）＞弩兵＞戈兵。\n\n■ 外交　按 F2 打开外交画面。不宣战就不能攻击他国。攻下城邑即归我方所有。失去全部城邑的国家灭亡。\n■ 议和请求　交战国提出议和（包括联军解散、史实休战）时，以“接受（Y）”或“拒绝（N）”回应。回应之前时间停止。拒绝即可继续交战。\n\n■ 霸主号召（春秋）　频繁宣战或攻城会提高“诸侯警戒”，达到100时最强之国号召诸侯，周边各国在15年内一齐来攻。\n■ 合纵军（战国）　出现一枝独秀的强国时，周边各国合纵，在15年内一齐进攻。\n■ 三家分晋　战国时代到来时，晋分裂为韩、赵、魏。\n■ 灭亡与人口上限　国家灭亡时，其民与兵的上限（4，加上此前分得的部分）会分给存活的国家，攻灭者优先。分得的部分加在由城邑数决定的上限（最多25）之上。\n■ 要塞　只选中民时，可用“要塞（R）”修筑（粮300・木400・铜300）。射击靠近的敌兵（射程9）。数量上限为“1＋城邑数÷2”（最多6）。可消耗多余资源。\n■ 史实事件　到了史实年份，英雄、诸子百家、政治家会出现并增强国力（一定年数内生产或武力提升）；叛乱与篡位则会损失士兵与储备，君主家（国姓）随之更替。若该国已灭亡则不会发生。记录及各国君主家、人物可在“史记”（F3，或从外交画面）查看。\n■ 上帝降临　若未能在史实上中华统一的公元前221年之前统一天下，上帝将降临于秦（即使秦已灭亡也会复活）。上帝之军不可抗拒，10年之内中华将归于秦，游戏结束。\n■ 英灵模式（在标题画面选择，默认关闭）　选中民后按“召唤英灵”（H），即可献祭所选的民，跨越时代与国界召唤自三皇五帝至春秋战国的英灵。英灵能力为祭品能力总和的1.1〜3.0倍（因英灵而异）。每国同时只能拥有一位英灵，同一英灵不会出现在两国。他国也会召唤。只有英灵能伤及上帝之兵，英灵附近的城邑也不会被上帝之军夺走。上帝降临10年后，若我国版图大于上帝之秦即获胜。\n■ 国家特点　各国拥有基于史实的特点（可在标题画面与史记中查看）。周在春秋时代不会灭亡（即使最后的城邑被攻破，攻方也会撤兵）。秦有关中之险，城池坚固；赵推行胡服骑射（前307年起）后骑兵强大；韩有强弩，魏有武卒；齐、宋、郑商人云集，等等。\n■ 贸易（F4）　不属于任何国家的商人周游列国，生产力越高的国家聚集越多。商人只要途经领内就会缴税（钱），其数量与中原整体生产量成正比。税率越轻，商人越多。钱可在市场换成粮、木、铜。西域商人只会来到河西走廊、草原之路、蜀身毒道尽头的地区（关中、河东、洛邑，北方边地，蜀、巴），并缴纳大量税收。\n■ 山地与游牧民　犬戎、山戎、林胡、东胡、匈奴、百越等不是国家。他们按时代出现，或来劫掠防守薄弱的国家（攻下城邑后夺取储备撤走），或来贩卖马匹、毛皮。可在贸易画面用钱雇其为佣兵，受雇期间不会袭击雇主。\n■ 指挥中时间停止　选中己方单位时时间停止，下达移动、攻击、采集、建造等命令（或取消选择）后继续。框选拖动时也会停止。\n■ 战争迷雾　只能看到己方民、兵、建筑周围。看过的土地会暗淡地保留，可见地形与城池，但看不到敌兵。诸侯都城的位置从一开始就已知。选中单位后按“探索”（X），各单位会分头侦察未知区域。\n\n■ 操作\n选中至少两个己方军事单位，从“军团”（J）组建。点击军团编号召回，按 A 指定进军目标，按 D 迎击入侵者或集结防守。\n軍事ユニットを2体以上選択し、「軍団」（J）から編成。軍団番号で呼び出し、Aで進軍先を指定、Dで領内の迎撃・防衛集結を命じる。\n　左键：选择　拖动：框选　双击：选择全部同类（可选中屏幕内已完工的兵营并批量生产）　Shift：追加选择\n　右键：移动／攻击／采集（森林・铜矿・田）／协助建造　选中建筑时右键：集结点\n　A：进军（攻击移动）　S：停止　T：训练・教化　C：兵⇔民转换　Q/W/E：建造・训练\n　按住 Ctrl 放置建筑：预约建造（可连续放置）。所选的民完成当前建造后，按放置顺序依次建造（建造地显示顺序）\n　Ctrl+数字：编队　数字：调出编队　.：闲置的民　Home：回国都\n　滚轮：缩放　中键拖动・方向键・画面边缘：滚动　点击小地图：移动\n　Space：暂停　＋／－：速度　Esc：取消　F5：存档（保存・读取）　F11：全屏　Ctrl＋＋／Ctrl＋−：文字大小"
         );
         // 入りきらなければ小さい字にする
         let f = if self.gfx.measure_h(text, Font::Normal, pw - 48.0) > ph - 64.0 { Font::Small } else { Font::Normal };

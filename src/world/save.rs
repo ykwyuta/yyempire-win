@@ -133,6 +133,10 @@ fn r_target(r: &mut Reader) -> RResult<Target> {
 fn w_order(w: &mut Writer, o: Order) {
     match o {
         Order::Idle => w.u8(0),
+        Order::Explore(goal) => {
+            w.u8(33);
+            w_ov2(w, goal);
+        }
         Order::Forestry { region, target, cursor } => {
             w.u8(32);
             w.usize(region);
@@ -179,6 +183,12 @@ fn w_order(w: &mut Writer, o: Order) {
 fn r_order(r: &mut Reader, mines: usize) -> RResult<Order> {
     Ok(match r.u8()? {
         0 => Order::Idle,
+        33 => {
+            let goal = r_ov2(r)?.filter(|p| {
+                (0.0..MAP_W as f32).contains(&p.x) && (0.0..MAP_H as f32).contains(&p.y)
+            });
+            Order::Explore(goal)
+        }
         32 => {
             let region = r.usize()?;
             let target = r.usize()?.checked_sub(1);
@@ -913,6 +923,16 @@ impl World {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exploration_orders_roundtrip() {
+        for order in [Order::Explore(None), Order::Explore(Some(v2(20.5, 12.5))), Order::Idle] {
+            let mut w = Writer::new();
+            w_order(&mut w, order);
+            assert_eq!(r_order(&mut Reader::new(&w.buf), 0).unwrap(), order);
+        }
+    }
+
 
     /// 長く進めた世界を書き出して読み戻すと、同じ状態から同じように進む
     #[test]
