@@ -69,8 +69,11 @@ impl Game {
         w.f32(self.zoom);
         w.u32(self.speed);
         w.rle(&self.fog);
-        w.usize(self.groups.len());
-        for g in self.groups.iter() {
+        // 軍団は操作グループの後ろに保存。旧版は先頭10枠だけを使用する。
+        let has_corps = self.corps.iter().any(|c| !c.is_empty());
+        let corps = if has_corps { &self.corps[..] } else { &[] };
+        w.usize(self.groups.len() + corps.len());
+        for g in self.groups.iter().chain(corps) {
             w.usize(g.len());
             for h in g.iter() {
                 w.u32(h.idx);
@@ -133,6 +136,14 @@ impl Game {
         self.fog = fog;
         self.fog_t = 0.0;
         self.update_fog(0.0);
+        self.reset_corps();
+        let mut assigned = std::collections::HashSet::new();
+        for (corps, saved) in self.corps.iter_mut().zip(groups.iter_mut().skip(10)) {
+            saved.retain(|h| self.world.unit(*h).is_some_and(|u| {
+                u.nation as usize == self.world.player && u.kind.military() && assigned.insert((h.idx, h.gen))
+            }));
+            *corps = std::mem::take(saved);
+        }
         groups.resize(10, Vec::new());
         self.groups = groups;
         self.sel.clear();
