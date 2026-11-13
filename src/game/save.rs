@@ -136,7 +136,8 @@ impl Game {
         groups.resize(10, Vec::new());
         self.groups = groups;
         self.sel.clear();
-        self.sel_b = None;
+        self.sel_b.clear();
+        self.last_barracks_click = None;
         self.last_sel.clear();
         self.mode = Mode::Normal;
         self.cmd_pause = false;
