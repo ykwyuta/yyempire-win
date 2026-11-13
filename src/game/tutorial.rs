@@ -285,7 +285,7 @@ impl Game {
             Goal::GatherMine => self.own_units().any(|u| matches!(u.order, Order::Gather { src: Src::Mine(..), .. })),
             Goal::PlaceFarm => self.count_blds(BKind::Farm, false) > b.farms,
             Goal::FarmDone => self.count_blds(BKind::Farm, true) > b.farms_done,
-            Goal::SelectCity => self.sel_b.and_then(|h| self.world.bld(h)).map_or(false, |bd| bd.nation as usize == pl && bd.kind.city()),
+            Goal::SelectCity => self.sel_b.first().and_then(|&h| self.world.bld(h)).map_or(false, |bd| bd.nation as usize == pl && bd.kind.city()),
             Goal::TrainWorker => {
                 self.own_units().filter(|u| u.kind == UnitKind::Worker).count() > b.workers
                     || self.world.blds.iter().any(|bd| bd.alive && bd.nation as usize == pl && bd.kind.city() && !bd.queue.is_empty())
